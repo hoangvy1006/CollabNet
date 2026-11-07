@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CollabNet</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="login" class="overlay">
+  <form id="loginForm" class="card" autocomplete="off">
+    <h1>CollabNet</h1>
+    <p class="muted">Ứng dụng cộng tác client-server trên UDP streaming</p>
+    <label>Server (host:port)
+      <div class="row"><input id="server" required><button type="button" id="discoverBtn" class="ghost">Tìm trong LAN</button></div>
+    </label>
+    <div id="found" class="muted"></div>
+    <label>Tên người dùng <input id="user" required minlength="2" maxlength="24" placeholder="vd: alice"></label>
+    <label>Mật khẩu <input id="pass" type="password" required minlength="4"></label>
+    <p class="muted small">Tên chưa tồn tại sẽ được tự đăng ký với mật khẩu này.</p>
+    <button type="submit" id="loginBtn">Đăng nhập</button>
+    <div id="loginErr" class="err"></div>
+  </form>
+</div>
+
+<header>
+  <strong>CollabNet</strong>
+  <span id="statusDot" class="dot off"></span><span id="statusText">offline</span>
+  <span id="me" class="muted"></span>
+  <span class="spacer"></span>
+  <span id="stats" class="chips" aria-live="polite"></span>
+  <button id="logoutBtn" class="ghost">Đăng xuất</button>
+</header>
+
+<div id="banner" class="banner hidden"></div>
+
+<main>
+  <aside>
+    <h3>Đang online <span id="peerCount" class="muted"></span></h3>
+    <ul id="peers"></ul>
+    <p id="peerEmpty" class="muted small">Chưa có ai khác online.</p>
+  </aside>
+
+  <section id="chat">
+    <div id="chatTitle" class="chatTitle"></div>
+    <div id="log"></div>
+    <div id="dropHint" class="hidden">Thả file để gửi</div>
+    <form id="composer">
+      <button type="button" id="attach" class="ghost" title="Gửi file">📎</button>
+      <input id="file" type="file" class="hidden">
+      <input id="text" placeholder="Nhập tin nhắn…" maxlength="8000" autocomplete="off" disabled>
+      <button type="submit" id="sendBtn" disabled>Gửi</button>
+    </form>
+  </section>
+
+  <aside id="transfers">
+    <h3>Truyền file</h3>
+    <ul id="tlist"></ul>
+    <p id="tempty" class="muted small">Chưa có file nào.</p>
+  </aside>
+</main>
+<div id="toasts"></div>
+<script src="/app.js"></script>
+</body>
+</html>

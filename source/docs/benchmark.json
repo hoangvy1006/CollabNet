@@ -1,0 +1,58 @@
+[
+ {
+  "cc": "cubic",
+  "loss": 0.0,
+  "seconds": 0.31,
+  "mbps": 51.76,
+  "lost": 0
+ },
+ {
+  "cc": "bbr",
+  "loss": 0.0,
+  "seconds": 0.42,
+  "mbps": 38.17,
+  "lost": 0
+ },
+ {
+  "cc": "cubic",
+  "loss": 0.01,
+  "seconds": 2.48,
+  "mbps": 6.46,
+  "lost": 21
+ },
+ {
+  "cc": "bbr",
+  "loss": 0.01,
+  "seconds": 0.43,
+  "mbps": 37.33,
+  "lost": 12
+ },
+ {
+  "cc": "cubic",
+  "loss": 0.03,
+  "seconds": 5.76,
+  "mbps": 2.78,
+  "lost": 52
+ },
+ {
+  "cc": "bbr",
+  "loss": 0.03,
+  "seconds": 0.59,
+  "mbps": 26.89,
+  "lost": 46
+ },
+ {
+  "cc": "cubic",
+  "loss": 0.05,
+  "seconds": 6.6,
+  "mbps": 2.43,
+  "lost": 81
+ },
+ {
+  "cc": "bbr",
+  "loss": 0.05,
+  "seconds": 0.55,
+  "mbps": 29.17,
+  "lost": 98
+ }
+]
