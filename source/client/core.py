@@ -31,6 +31,9 @@ class ClientCore:
         self.user = None
         self.creds = None
         self.peers, self.history, self.files = [], [], []
+        self._midx: dict[str, dict] = {}        # message id -> history item (delivery status)
+        self._fidx: dict[str, dict] = {}        # file id -> file item (progress / status)
+        self.max_file = None                    # server's file-size limit (bytes), learnt at login
         self.subscribers: set[asyncio.Queue] = set()
         self.rx: dict[int, dict] = {}
         self.aborted: set[str] = set()
@@ -59,7 +62,16 @@ class ClientCore:
 
     def snapshot(self):
         return {"status": self.status, "user": self.user, "peers": self.peers, "history": self.history[-300:],
-                "files": self.files[-100:], "stats": self.conn.stats() if self.conn else None, "cc": self.cc}
+                "files": self.files[-100:], "stats": self.conn.stats() if self.conn else None, "cc": self.cc,
+                "max_file": self.max_file}
+
+    def _remember(self, item, index, store):
+        """Keep bounded in-memory history (messages / file transfers) so the UI can rebuild after a reload."""
+        store.append(item)
+        index[item["id"]] = item
+        if len(store) > 2000:
+            old = store.pop(0)
+            index.pop(old["id"], None)
 
     # ------------------------------------------------------------ connection management
     def _verify_server(self, host, port):
@@ -112,6 +124,7 @@ class ClientCore:
             await self._disconnect(announce=False)
             raise
         self.user, self.peers, self.status = res["user"], res["peers"], "online"
+        self.max_file = res.get("max_file")
         self.emit("status", status=self.status, user=self.user)
         self.emit("peers", peers=self.peers)
         self._stats_on = True
@@ -241,16 +254,26 @@ class ClientCore:
             self.peers = m["peers"]
             self.emit("peers", peers=self.peers)
         elif t == "SENT":
-            self.emit("sent", ref=m.get("ref"), n=m.get("n"))
+            item = self._midx.get(m.get("ref"))
+            if item:
+                item.update(status="sent", n=m.get("n"), ts=m.get("ts", item["ts"]))   # server clock = common ordering
+            self.emit("sent", ref=m.get("ref"), n=m.get("n"), ts=m.get("ts"))
         elif t == "ERR":
-            ref = m.get("ref", "")
+            ref, text = m.get("ref", ""), m.get("msg", "error")
             self.aborted.add(ref)
-            self.emit("error", ref=ref, text=m.get("msg", "error"))
+            self._fail(ref, text)
+            self.emit("error", ref=ref, text=text)
+
+    def _fail(self, ref, text):
+        """Mark a message or a file transfer as failed (state survives a UI reload)."""
+        item = self._midx.get(ref) or self._fidx.get(ref)
+        if item and item.get("status") != "done":
+            item.update(status="failed", error=text)
 
     def _on_msg(self, m):
         item = {"id": m.get("id"), "from": m.get("from"), "to": m.get("to"), "text": m.get("text", ""),
-                "ts": m.get("ts", time.time()), "mine": False}
-        self.history.append(item)
+                "ts": m.get("ts", time.time()), "mine": False, "status": "sent"}
+        self._remember(item, self._midx, self.history)
         self.emit("msg", **item)
 
     def _unique_path(self, name):
@@ -265,8 +288,12 @@ class ClientCore:
         path = self._unique_path(hdr.get("name", "file"))
         st.update(kind="file", hdr=hdr, path=path, fh=open(path + ".part", "wb"), sha=hashlib.sha256(),
                   remaining=int(hdr["size"]), got=0, last_emit=0.0, trailer=None)
-        self.emit("file_start", id=hdr.get("id"), name=os.path.basename(path), size=st["remaining"],
-                  frm=hdr.get("from"), dir="down")
+        item = {"id": hdr.get("id"), "from": hdr.get("from"), "to": self.user, "name": os.path.basename(path),
+                "size": st["remaining"], "ts": time.time(), "mine": False, "status": "active", "done": 0, "dir": "down"}
+        self._remember(item, self._fidx, self.files)
+        st["item"] = item
+        self.emit("file_start", id=item["id"], name=item["name"], size=item["size"], frm=item["from"],
+                  to=self.user, dir="down")
 
     def _file_data(self, st, _unused, fin):
         buf = st["buf"]
@@ -276,6 +303,7 @@ class ClientCore:
             st["sha"].update(chunk)
             st["remaining"] -= len(chunk)
             st["got"] += len(chunk)
+            st["item"]["done"] = st["got"]
             now = time.monotonic()
             if now - st["last_emit"] > 0.1:
                 st["last_emit"] = now
@@ -289,18 +317,19 @@ class ClientCore:
         st["fh"].close()
         hdr, path = st["hdr"], st["path"]
         ok = st["remaining"] == 0 and st["trailer"] and st["trailer"].get("sha256") == st["sha"].hexdigest()
+        item = st["item"]
         if ok:
             os.replace(path + ".part", path)
-            item = {"id": hdr.get("id"), "from": hdr.get("from"), "name": os.path.basename(path),
-                    "size": int(hdr["size"]), "ts": time.time()}
-            self.files.append(item)
-            self.emit("file_received", **item)
+            item.update(status="done", done=item["size"], ts=time.time())
+            self.emit("file_received", id=item["id"], **{k: item[k] for k in ("from", "name", "size", "ts")})
         else:
             try:
                 os.remove(path + ".part")
             except OSError:
                 pass
-            self.emit("error", ref=hdr.get("id"), text=f"File '{hdr.get('name')}' is corrupted or incomplete")
+            text = f"File '{hdr.get('name')}' is corrupted or incomplete"
+            self._fail(item["id"], text)
+            self.emit("error", ref=hdr.get("id"), text=text)
 
     # ------------------------------------------------------------ sending
     def _require(self):
@@ -313,8 +342,9 @@ class ClientCore:
         mid = uuid.uuid4().hex[:12]
         sid = conn.open_stream(0)
         conn.send(sid, pack({"t": "MSG", "id": mid, "to": to, "text": text}), fin=True)
-        item = {"id": mid, "from": self.user, "to": to, "text": text, "ts": time.time(), "mine": True}
-        self.history.append(item)
+        item = {"id": mid, "from": self.user, "to": to, "text": text, "ts": time.time(), "mine": True,
+                "status": "pending"}
+        self._remember(item, self._midx, self.history)
         self.emit("msg", **item)
         return mid
 
@@ -326,6 +356,9 @@ class ClientCore:
         header = pack({"t": "FILE", "id": fid, "to": to, "name": name, "size": size})
         conn.send(sid, header)
         done_fut = conn.send_done(sid)
+        item = {"id": fid, "from": self.user, "to": to, "name": name, "size": size, "ts": time.time(),
+                "mine": True, "status": "active", "done": 0, "dir": "up"}
+        self._remember(item, self._fidx, self.files)
         self.emit("file_start", id=fid, name=name, size=size, frm=self.user, to=to, dir="up")
 
         async def progress():
@@ -333,9 +366,10 @@ class ClientCore:
                 await asyncio.sleep(0.2)
                 off = conn.acked_offset(sid)
                 got = size if off is None else max(0, off - len(header))
-                self.emit("file_progress", id=fid, done=min(got, size), size=size, dir="up")
+                item["done"] = min(got, size)
+                self.emit("file_progress", id=fid, done=item["done"], size=size, dir="up")
         ptask = asyncio.ensure_future(progress())
-        sha, sent = hashlib.sha256(), 0
+        sha, sent, finished = hashlib.sha256(), 0, False
         try:
             async for chunk in chunks:
                 if fid in self.aborted:
@@ -352,10 +386,22 @@ class ClientCore:
             conn.send(sid, pack({"t": "FILE_END", "sha256": sha.hexdigest()}), fin=True)
             if not await done_fut:
                 raise ConnectionError("connection lost during transfer")
+            finished = True
+            item.update(status="done", done=size, ts=time.time())
             self.emit("file_progress", id=fid, done=size, size=size, dir="up")
             self.emit("file_sent", id=fid, name=name, size=size, to=to)
+        except BaseException as exc:
+            if not finished and item["status"] != "failed":
+                self._fail(fid, str(exc) or "transfer failed")
+                self.emit("error", ref=fid, text=str(exc) or "transfer failed")
+            raise
         finally:
             ptask.cancel()
+            if not finished and not conn.closed:
+                try:                       # FIN without FILE_END: receiver drops its .part file instead of waiting forever
+                    conn.send(sid, b"", fin=True)
+                except Exception:
+                    pass
         return fid
 
     def open_download(self, name):

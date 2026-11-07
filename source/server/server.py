@@ -159,7 +159,8 @@ class Server:
         s.user = user
         self.by_user[user] = s
         log.info("user %s logged in from %s:%d (%s)", user, *s.addr, why)
-        self._send_ctrl(s, {"t": "AUTH_OK", "user": user, "peers": self._peers(), "msg": why})
+        self._send_ctrl(s, {"t": "AUTH_OK", "user": user, "peers": self._peers(), "msg": why,
+                            "max_file": self.max_file})
         self._broadcast_peers()
 
     # ------------------------------------------------------------ message / file streams

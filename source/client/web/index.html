@@ -2,64 +2,145 @@
 <html lang="vi">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
 <title>CollabNet</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<div id="login" class="overlay">
-  <form id="loginForm" class="card" autocomplete="off">
-    <h1>CollabNet</h1>
-    <p class="muted">Ứng dụng cộng tác client-server trên UDP streaming</p>
-    <label>Server (host:port)
-      <div class="row"><input id="server" required><button type="button" id="discoverBtn" class="ghost">Tìm trong LAN</button></div>
-    </label>
-    <div id="found" class="muted"></div>
-    <label>Tên người dùng <input id="user" required minlength="2" maxlength="24" placeholder="vd: alice"></label>
-    <label>Mật khẩu <input id="pass" type="password" required minlength="4"></label>
-    <p class="muted small">Tên chưa tồn tại sẽ được tự đăng ký với mật khẩu này.</p>
-    <button type="submit" id="loginBtn">Đăng nhập</button>
-    <div id="loginErr" class="err"></div>
-  </form>
-</div>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></symbol>
+  <symbol id="i-clip" viewBox="0 0 24 24"><path d="m21.4 11-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></symbol>
+  <symbol id="i-smile" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/></symbol>
+  <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-retry" viewBox="0 0 24 24"><path d="M23 4v6h-6M1 20v-6h6M3.5 9a9 9 0 0 1 14.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0 0 20.5 15"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M19 12l-7 7-7-7"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+  <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+</svg>
 
-<header>
-  <strong>CollabNet</strong>
-  <span id="statusDot" class="dot off"></span><span id="statusText">offline</span>
-  <span id="me" class="muted"></span>
-  <span class="spacer"></span>
-  <span id="stats" class="chips" aria-live="polite"></span>
-  <button id="logoutBtn" class="ghost">Đăng xuất</button>
-</header>
-
-<div id="banner" class="banner hidden"></div>
-
-<main>
-  <aside>
-    <h3>Đang online <span id="peerCount" class="muted"></span></h3>
-    <ul id="peers"></ul>
-    <p id="peerEmpty" class="muted small">Chưa có ai khác online.</p>
-  </aside>
-
-  <section id="chat">
-    <div id="chatTitle" class="chatTitle"></div>
-    <div id="log"></div>
-    <div id="dropHint" class="hidden">Thả file để gửi</div>
-    <form id="composer">
-      <button type="button" id="attach" class="ghost" title="Gửi file">📎</button>
-      <input id="file" type="file" class="hidden">
-      <input id="text" placeholder="Nhập tin nhắn…" maxlength="8000" autocomplete="off" disabled>
-      <button type="submit" id="sendBtn" disabled>Gửi</button>
-    </form>
+<!-- ============================== đăng nhập ============================== -->
+<main id="login" class="login">
+  <section class="login-art" aria-label="Minh hoạ luồng dữ liệu">
+    <div class="brand"><svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="5" width="20" height="5" rx="2.5"/><rect x="2" y="13.5" width="28" height="5" rx="2.5"/><rect x="2" y="22" width="14" height="5" rx="2.5"/></svg>CollabNet</div>
+    <div class="art-copy">
+      <h1>Chat và gửi file ngay trong mạng nội bộ.</h1>
+      <p>Không cần internet, không qua máy chủ bên thứ ba. Mọi gói tin đều được mã hoá.</p>
+    </div>
+    <figure class="lanes">
+      <svg viewBox="0 0 560 250" role="img" aria-label="Năm luồng song song, một gói chậm không làm các luồng khác dừng lại">
+        <g class="lane-lines"><path d="M0 35H560M0 80H560M0 125H560M0 170H560M0 215H560"/></g>
+        <rect class="pkt p1" x="40"  y="27" width="54" height="16" rx="8"/>
+        <rect class="pkt p1 b" x="300" y="27" width="34" height="16" rx="8"/>
+        <rect class="pkt p2" x="150" y="72" width="70" height="16" rx="8"/>
+        <rect class="pkt p2 b" x="420" y="72" width="40" height="16" rx="8"/>
+        <rect class="pkt stall" x="230" y="117" width="60" height="16" rx="8"/>
+        <rect class="pkt p4" x="70"  y="162" width="44" height="16" rx="8"/>
+        <rect class="pkt p4 b" x="360" y="162" width="64" height="16" rx="8"/>
+        <rect class="pkt p5" x="200" y="207" width="56" height="16" rx="8"/>
+        <rect class="pkt p5 b" x="470" y="207" width="30" height="16" rx="8"/>
+      </svg>
+      <figcaption>Mỗi tin nhắn đi trên một luồng riêng: một gói chậm không chặn các luồng còn lại.</figcaption>
+    </figure>
   </section>
 
-  <aside id="transfers">
-    <h3>Truyền file</h3>
-    <ul id="tlist"></ul>
-    <p id="tempty" class="muted small">Chưa có file nào.</p>
-  </aside>
+  <form id="loginForm" class="login-form" autocomplete="off">
+    <h2>Đăng nhập</h2>
+    <div class="field">
+      <label for="server">Máy chủ</label>
+      <div class="inline"><input id="server" required placeholder="192.168.1.10:9000"><button type="button" id="discoverBtn" class="btn quiet">Tìm trong LAN</button></div>
+      <div id="found" class="found" aria-live="polite"></div>
+    </div>
+    <div class="field"><label for="user">Tên người dùng</label><input id="user" required minlength="2" maxlength="24" placeholder="vd: alice" autocapitalize="none" spellcheck="false"></div>
+    <div class="field"><label for="pass">Mật khẩu</label><input id="pass" type="password" required minlength="4"></div>
+    <p class="hint">Tên chưa có sẽ được đăng ký tự động với mật khẩu này.</p>
+    <button type="submit" id="loginBtn" class="btn">Đăng nhập</button>
+    <div id="loginErr" class="form-err" role="alert"></div>
+  </form>
 </main>
-<div id="toasts"></div>
+
+<!-- ============================== ứng dụng ============================== -->
+<div id="app" class="app hidden" data-pane="list">
+  <nav class="rail" aria-label="Cuộc trò chuyện">
+    <div class="rail-top">
+      <div class="brand sm"><svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="5" width="20" height="5" rx="2.5"/><rect x="2" y="13.5" width="28" height="5" rx="2.5"/><rect x="2" y="22" width="14" height="5" rx="2.5"/></svg>CollabNet</div>
+      <button id="themeBtn" class="iconbtn" title="Đổi giao diện sáng/tối" aria-label="Đổi giao diện sáng/tối"><svg class="ic"><use href="#i-moon"/></svg></button>
+    </div>
+    <div class="searchbox"><svg class="ic"><use href="#i-search"/></svg><input id="filter" placeholder="Tìm cuộc trò chuyện" aria-label="Tìm cuộc trò chuyện" autocomplete="off"></div>
+    <div id="convs" class="convs"></div>
+    <div class="me">
+      <div id="meAv"></div>
+      <div class="me-text"><strong id="meName"></strong><span id="meStatus" class="me-status"><i id="statusDot" class="dot off"></i><span id="statusText">Chưa kết nối</span></span></div>
+      <button id="logoutBtn" class="iconbtn" title="Đăng xuất" aria-label="Đăng xuất"><svg class="ic"><use href="#i-logout"/></svg></button>
+    </div>
+  </nav>
+
+  <section class="chat" id="chat">
+    <header class="chat-head">
+      <button id="backBtn" class="iconbtn only-mobile" aria-label="Quay lại danh sách"><svg class="ic"><use href="#i-back"/></svg></button>
+      <div id="headAv"></div>
+      <div class="head-text"><h2 id="chatTitle"></h2><p id="chatSub"></p></div>
+      <button id="linkChip" class="chip" title="Xem chi tiết đường truyền" aria-label="Xem chi tiết đường truyền"><i id="chipDot" class="dot off"></i><span id="chipText">Chưa kết nối</span></button>
+      <button id="panelBtn" class="iconbtn" title="Đường truyền và tệp" aria-label="Đường truyền và tệp" aria-expanded="false"><svg class="ic"><use href="#i-panel"/></svg></button>
+    </header>
+    <div id="banner" class="banner hidden" role="status"></div>
+    <div id="log" class="log" role="log" aria-live="polite" aria-label="Tin nhắn"></div>
+    <button id="jump" class="jump hidden"><svg class="ic"><use href="#i-down"/></svg><span id="jumpText">Tin mới</span></button>
+    <div class="composer">
+      <div id="cnotice" class="cnotice hidden"></div>
+      <form id="composer" class="box">
+        <button type="button" id="attach" class="iconbtn" title="Gửi file" aria-label="Gửi file"><svg class="ic"><use href="#i-clip"/></svg></button>
+        <input id="file" type="file" multiple class="hidden">
+        <textarea id="text" rows="1" placeholder="Nhập tin nhắn" maxlength="8000" aria-label="Nội dung tin nhắn" disabled></textarea>
+        <span id="counter" class="counter hidden"></span>
+        <button type="button" id="emojiBtn" class="iconbtn" title="Biểu tượng cảm xúc" aria-label="Biểu tượng cảm xúc"><svg class="ic"><use href="#i-smile"/></svg></button>
+        <button type="submit" id="sendBtn" class="send" title="Gửi (Enter)" aria-label="Gửi" disabled><svg class="ic"><use href="#i-send"/></svg></button>
+      </form>
+      <div id="emoji" class="emoji hidden" role="dialog" aria-label="Chọn biểu tượng"></div>
+    </div>
+    <div id="dropHint" class="drop hidden"><div><strong>Thả file để gửi</strong><span id="dropSub"></span></div></div>
+  </section>
+
+  <aside class="panel" id="panel" aria-label="Đường truyền và tệp">
+    <div class="panel-in">
+      <section>
+        <h3><svg class="ic"><use href="#i-pulse"/></svg>Đường truyền</h3>
+        <p id="linkLine" class="link-line">Chưa kết nối</p>
+        <div class="graph"><div class="graph-top"><span>Độ trễ</span><b id="rttNow">–</b></div><svg id="rttSvg" viewBox="0 0 120 40" preserveAspectRatio="none"></svg></div>
+        <div class="graph"><div class="graph-top"><span>Cửa sổ gửi</span><b id="cwndNow">–</b></div><svg id="cwndSvg" viewBox="0 0 120 40" preserveAspectRatio="none"></svg></div>
+        <dl class="stats">
+          <dt>Đang trên đường</dt><dd id="stFlight">–</dd>
+          <dt>Gói bị mất</dt><dd id="stLost">–</dd>
+          <dt>Thuật toán</dt><dd id="stCc">–</dd>
+        </dl>
+      </section>
+      <section>
+        <h3><svg class="ic"><use href="#i-clip"/></svg><span id="filesTitle">Tệp trong cuộc trò chuyện</span></h3>
+        <ul id="tlist" class="tlist"></ul>
+        <p id="tempty" class="empty-note">Chưa có tệp nào. Kéo thả file vào khung chat để gửi.</p>
+      </section>
+    </div>
+  </aside>
+</div>
+
+<dialog id="picker" class="picker">
+  <form method="dialog">
+    <h3>Gửi file cho ai?</h3>
+    <p id="pickerSub" class="hint"></p>
+    <div id="pickerList" class="picker-list"></div>
+    <button class="btn quiet" value="cancel">Huỷ</button>
+  </form>
+</dialog>
+<div id="toasts" class="toasts" role="status" aria-live="polite"></div>
 <script src="/app.js"></script>
 </body>
 </html>

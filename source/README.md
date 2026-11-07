@@ -24,14 +24,23 @@ Tuỳ chọn: `--cc cubic|bbr`, `--host`, `--data-dir`, `--max-file-mb`, `--no-b
 ## 3. Chạy client (mỗi người dùng một terminal)
 ```bash
 python -m client.main --ui-port 8080 --server 127.0.0.1:9000 --open
-python -m client.main --ui-port 8081 --server 127.0.0.1:9000 --open     # người dùng thứ 2 (cùng máy)
+python -m client.main --ui-port 8081 --server 127.0.0.1:9000 --open    # người dùng thứ 2 (cùng máy)
+python -m client.main --ui-port 8082 --server 127.0.0.1:9000 --open    # người dùng thứ 3 (cùng máy)
+... # người dùng thứ n (cùng máy)
 ```
 Mở `http://127.0.0.1:8080`, nhập tên + mật khẩu (tên mới sẽ tự đăng ký, mật khẩu ≥ 4 ký tự).
 Khác máy: dùng IP của server (`--server 192.168.1.10:9000`) hoặc nút **"Tìm trong LAN"** (server broadcast beacon UDP).
 Mỗi client lưu file nhận và khoá server đã ghim trong `./client_state_<ui-port>/`.
 
-Cách dùng UI: chọn *Mọi người* để chat chung, chọn một người để nhắn riêng; nút 📎 hoặc kéo-thả để gửi file
-(chỉ gửi cho một người). Thanh trên cùng hiển thị thuật toán CC, RTT, cwnd, gói mất theo thời gian thực.
+Cách dùng UI:
+* Cột trái là danh sách cuộc trò chuyện: **Cả nhóm** (chat chung) và từng người (chat riêng). Mỗi cuộc có luồng tin nhắn riêng,
+  badge tin chưa đọc, bản nháp riêng; hội thoại với người đã offline vẫn được giữ lại (chỉ không gửi được).
+* Enter để gửi, Shift+Enter xuống dòng; link tự động bấm được; tin gửi lỗi có nút **Gửi lại**; nhiều biểu tượng cảm xúc sẵn có.
+* Gửi file: nút 📎, kéo-thả hoặc dán ảnh (Ctrl+V). Có thể chọn nhiều file. Từ khung chat chung, ứng dụng hỏi gửi cho ai.
+  Thẻ file hiển thị phần trăm, tốc độ, thời gian còn lại, nút huỷ/gửi lại/tải về và xem trước ảnh.
+* Bảng bên phải: biểu đồ RTT, cwnd, gói mất theo thời gian thực (thuật toán CUBIC/BBR) và danh sách tệp của cuộc trò chuyện.
+* Giao diện sáng/tối (tự theo hệ thống, có nút đổi). Font Be Vietnam Pro được đóng gói sẵn trong `client/web/fonts` (giấy phép OFL),
+  nên chạy tốt cả khi mạng LAN không có internet.
 
 > Lần đầu kết nối, client ghim (TOFU) fingerprint của server. Nếu khoá đổi, client **từ chối** kết nối (chống MITM).
 > Muốn tin khoá mới: xoá mục tương ứng trong `known_hosts.json`.
@@ -44,7 +53,7 @@ python -m client.main --ui-port 8080 --cc bbr --sim-loss 0.05 --sim-delay-ms 20
 
 ## 5. Kiểm thử tự động
 ```bash
-python -m unittest discover -s tests -t . -v        # 19 test, ~45 giây
+python -m unittest discover -s tests -t . -v        # 31 test, ~55 giây
 python docs/benchmark.py                            # CUBIC vs BBR
 python docs/build_report.py                         # sinh lại docs/report.pdf (cần reportlab, matplotlib)
 ```
@@ -56,7 +65,7 @@ common/congestion.py  CUBIC và BBR + pacing          common/crypto.py   X25519/
 common/packet.py      định dạng gói + frame          common/protocol.py thông điệp ứng dụng (JSON có độ dài)
 common/discovery.py   beacon broadcast / dò server   server/server.py   xác thực, presence, định tuyến, relay file
 client/core.py        logic mạng phía client         client/gateway.py  HTTP/SSE server tự viết (raw TCP)
-client/web/           UI (index.html, app.js, style.css)      tests/  docs/report.pdf
+client/web/           UI (index.html, app.js, style.css, fonts/)      tests/  docs/report.pdf
 ```
 
 ## 7. Đối chiếu yêu cầu đề bài

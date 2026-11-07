@@ -98,6 +98,29 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         first = await asyncio.wait_for(r.readuntil(b"\r\n\r\n"), 3)
         self.assertIn(b"text/event-stream", first); w.close()
 
+    async def test_inline_preview_fonts_and_limits(self):
+        pa, pb = self.gws["alice"].port, self.gws["bob"].port
+        srv = f"127.0.0.1:{self.server.port}"
+        await jpost(pa, "/api/login", {"server": srv, "user": "alice", "pass": "pw1234"})
+        await jpost(pb, "/api/login", {"server": srv, "user": "bob", "pass": "pw1234"})
+        await asyncio.sleep(0.3)
+        s, head, body = await http(pa, "GET", "/fonts/be-vietnam-pro-vietnamese-400-normal.woff2")
+        self.assertEqual(s, 200); self.assertIn("font/woff2", head); self.assertEqual(body[:4], b"wOF2")
+        self.assertEqual((await http(pa, "GET", "/fonts/../app.js"))[0], 404)           # no path traversal
+        s, _ = await jpost(pa, "/api/send", {"to": "bob", "text": "x" * 9000}); self.assertEqual(s, 413)
+        q = self.cores["bob"].subscribe()
+        png = bytes.fromhex("89504e470d0a1a0a") + os.urandom(200)
+        hdr = {**X, "X-To": "bob", "X-Filename": "p.png", "X-File-Id": "img1"}
+        self.assertEqual((await http(pa, "POST", "/api/upload", hdr, png))[0], 200)
+        while True:
+            typ, d = await asyncio.wait_for(q.get(), 10)
+            if typ == "file_received":
+                break
+        s, head, got = await http(pb, "GET", "/api/download/p.png?inline=1")
+        self.assertIn("image/png", head); self.assertIn("inline", head); self.assertIn("sandbox", head)
+        s, head, got = await http(pb, "GET", "/api/download/p.png")
+        self.assertIn("attachment", head)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

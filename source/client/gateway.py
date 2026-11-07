@@ -15,12 +15,17 @@ import os
 import urllib.parse
 
 from common.discovery import discover
-from common.protocol import safe_filename
+from common.protocol import MAX_TEXT, safe_filename
 
 from .core import AuthError
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 STATIC = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/style.css": "style.css"}
+FONT_DIR = os.path.join(WEB_DIR, "fonts")
+FONTS = {f"/fonts/{n}" for n in os.listdir(FONT_DIR) if n.endswith(".woff2")} if os.path.isdir(FONT_DIR) else set()
+INLINE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+                ".webp": "image/webp"}       # previewed inline in chat; everything else is a forced download
+CSP = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; object-src 'none'; base-uri 'none'"
 MAX_UPLOAD = 2 * 1024 ** 3
 
 
@@ -59,7 +64,7 @@ class Gateway:
             if method == "POST" and headers.get("x-requested-with") != "collabnet":
                 raise HttpError(403, "missing X-Requested-With")
             url = urllib.parse.urlsplit(target)
-            await self._route(method, url.path, headers, reader, writer)
+            await self._route(method, url, headers, reader, writer)
         except HttpError as exc:
             await self._send_json(writer, {"ok": False, "error": exc.msg}, exc.status)
         except (ConnectionError, asyncio.IncompleteReadError):
@@ -110,10 +115,9 @@ class Gateway:
         return method, target, headers
 
     async def _send(self, writer, status, body: bytes, ctype, extra=None):
-        head = [f"HTTP/1.1 {status} {REASONS.get(status, '')}", f"Content-Type: {ctype}",
-                f"Content-Length: {len(body)}", "Connection: close", "Cache-Control: no-store",
-                "X-Content-Type-Options: nosniff", "Referrer-Policy: no-referrer"]
-        head += [f"{k}: {v}" for k, v in (extra or {}).items()]
+        hdrs = {"Content-Type": ctype, "Content-Length": len(body), "Connection": "close", "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", **(extra or {})}
+        head = [f"HTTP/1.1 {status} {REASONS.get(status, '')}"] + [f"{k}: {v}" for k, v in hdrs.items()]
         writer.write(("\r\n".join(head) + "\r\n\r\n").encode() + body)
         await writer.drain()
 
@@ -131,14 +135,18 @@ class Gateway:
             raise HttpError(400, "invalid JSON")
 
     # ------------------------------------------------------------ routes
-    async def _route(self, method, path, headers, reader, writer):
-        core = self.core
+    async def _route(self, method, url, headers, reader, writer):
+        core, path = self.core, url.path
         if method == "GET" and path in STATIC:
             with open(os.path.join(WEB_DIR, STATIC[path]), "rb") as fh:
                 body = fh.read()
             ctype = (mimetypes.guess_type(STATIC[path])[0] or "text/plain") + "; charset=utf-8"
             return await self._send(writer, 200, body, ctype,
-                                    {"Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline'"})
+                                    {"Content-Security-Policy": CSP})
+        if method == "GET" and path in FONTS:
+            with open(os.path.join(FONT_DIR, path[len("/fonts/"):]), "rb") as fh:
+                return await self._send(writer, 200, fh.read(), "font/woff2",
+                                        {"Cache-Control": "public, max-age=604800, immutable"})
         if method == "GET" and path == "/api/state":
             snap = core.snapshot()
             snap["default_server"] = self.default_server
@@ -148,7 +156,9 @@ class Gateway:
         if method == "GET" and path == "/api/discover":
             return await self._send_json(writer, {"servers": await discover(2.2)})
         if method == "GET" and path.startswith("/api/download/"):
-            return await self._download(writer, urllib.parse.unquote(path[len("/api/download/"):]))
+            q = urllib.parse.parse_qs(url.query)
+            return await self._download(writer, urllib.parse.unquote(path[len("/api/download/"):]),
+                                        inline="inline" in q)
         if method == "POST" and path == "/api/login":
             d = await self._read_json(reader, headers)
             try:
@@ -167,6 +177,8 @@ class Gateway:
             text = str(d.get("text", "")).strip()
             if not text:
                 raise HttpError(400, "empty message")
+            if len(text) > MAX_TEXT:
+                raise HttpError(413, f"message too long (max {MAX_TEXT} characters)")
             try:
                 mid = core.send_message(str(d.get("to", "*")), text)
             except ConnectionError as exc:
@@ -191,14 +203,18 @@ class Gateway:
         finally:
             self.core.unsubscribe(q)
 
-    async def _download(self, writer, name):
+    async def _download(self, writer, name, inline=False):
         path = self.core.open_download(name)
         if not path:
             raise HttpError(404, "file not found")
         size = os.path.getsize(path)
         quoted = urllib.parse.quote(os.path.basename(path))
-        writer.write((f"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {size}\r\n"
-                      f"Content-Disposition: attachment; filename*=UTF-8''{quoted}\r\nConnection: close\r\n\r\n").encode())
+        ctype = INLINE_TYPES.get(os.path.splitext(path)[1].lower()) if inline else None
+        disp = "inline" if ctype else "attachment"
+        writer.write((f"HTTP/1.1 200 OK\r\nContent-Type: {ctype or 'application/octet-stream'}\r\n"
+                      f"Content-Length: {size}\r\nContent-Disposition: {disp}; filename*=UTF-8''{quoted}\r\n"
+                      f"X-Content-Type-Options: nosniff\r\nContent-Security-Policy: sandbox\r\n"
+                      f"Cache-Control: private, max-age=3600\r\nConnection: close\r\n\r\n").encode())
         with open(path, "rb") as fh:
             while chunk := fh.read(65536):
                 writer.write(chunk)
