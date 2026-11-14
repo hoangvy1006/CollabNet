@@ -1,4 +1,8 @@
-"""Transport tests: crypto, ranges, reliable streams under loss/delay, HoL-blocking, CC algorithms."""
+"""Transport tests: crypto, ranges, reliable streams under loss/delay, HoL-blocking, CC algorithms.
+
+Kiểm thử tầng transport bằng cách ghép hai Endpoint thật trên loopback (không mock), nên bao gồm cả
+mã hoá, ACK/SACK, gửi lại và điều khiển tắc nghẽn chạy đúng như khi triển khai.
+"""
 import asyncio
 import hashlib
 import os
@@ -35,6 +39,10 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(f[4], ("C", 3, "bye"))
         with self.assertRaises(ValueError):
             decode_frames(b"\xff\x00")
+        # Frame CLOSE khai báo độ dài lý do (4096) lớn hơn số byte còn lại: phải bị coi là hỏng thay vì
+        # âm thầm trả về lý do rỗng (lỗi cũ).
+        with self.assertRaises(ValueError):
+            decode_frames(b"\x07\x00\x01\x10\x00")
 
     def test_crypto(self):
         a_priv, a_pub = crypto.new_ephemeral()

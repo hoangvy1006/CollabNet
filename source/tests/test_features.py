@@ -1,11 +1,14 @@
-"""Tests for the chat/file upgrades: delivery status, server-clock ordering, aborted uploads, file limit, inline preview."""
-import asyncio
+"""Tests for the chat/file upgrades: delivery status, server-clock ordering, aborted uploads, file limit, inline preview.
+
+Kiểm thử các hành vi người dùng thấy được: trạng thái "đang gửi/đã gửi/lỗi", sắp xếp theo giờ server,
+upload bị ngắt giữa chừng và giới hạn kích thước file do server công bố.
+"""
 import os
 import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tests.test_e2e import E2E, Collector, chunked
+from tests.test_e2e import E2E, chunked
 
 
 class FeatureTests(E2E):

@@ -1,4 +1,8 @@
-"""HTTP gateway tests: speak raw HTTP to the gateway exactly like the browser UI does."""
+"""HTTP gateway tests: speak raw HTTP to the gateway exactly like the browser UI does.
+
+Gửi HTTP thô qua TCP (không dùng client HTTP có sẵn) để kiểm tra đúng những gì trình duyệt gửi:
+Host header, X-Requested-With, upload dạng stream, SSE và các giới hạn bảo mật.
+"""
 import asyncio
 import hashlib
 import json

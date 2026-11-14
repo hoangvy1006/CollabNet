@@ -97,8 +97,6 @@ class E2E(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AuthError):
             await self.client("x", "pw")                  # invalid (too short) username
         # unreachable server: handshake timeout instead of hanging forever
-        c = ClientCore(asyncio.get_running_loop(), os.path.join(self.tmp, "z"))
-        import common.transport as T
         with self.assertRaises(ConnectionError):
             from common.transport import Endpoint
             ep = Endpoint(asyncio.get_running_loop())

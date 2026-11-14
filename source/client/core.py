@@ -1,4 +1,7 @@
-"""Client core: network logic + application protocol. No UI code here (see gateway.py / web/)."""
+"""Client core: network logic + application protocol. No UI code here (see gateway.py / web/).
+lớp ClientCore giữ kết nối tới server, tự kết nối lại khi mất mạng, lưu lịch sử tin nhắn/tệp trong
+bộ nhớ và phát sự kiện (emit) cho UI. Nhận file ghi vào `*.part` rồi đổi tên sau khi kiểm tra SHA-256.
+"""
 import asyncio
 import hashlib
 import json
@@ -9,18 +12,24 @@ import time
 import uuid
 
 from common import crypto
+from common.fsutil import atomic_write_json
 from common.protocol import MsgBuffer, ProtocolError, pack, safe_filename
 from common.transport import Endpoint
 
 log = logging.getLogger("collabnet.client")
-CHUNK = 32 * 1024
 
 
 class AuthError(Exception):
-    pass
+    """Đăng nhập không hoàn tất (server từ chối, hoặc kết nối đứt giữa chừng khi xác thực)."""
+
+
+class AuthRejected(AuthError):
+    """Server trả AUTH_FAIL: thông tin đăng nhập bị từ chối hẳn. Thử lại tự động sẽ vô ích."""
 
 
 class ClientCore:
+    """Toàn bộ logic mạng phía client. UI (gateway) chỉ đọc trạng thái và nhận sự kiện qua `subscribe()`."""
+
     def __init__(self, loop, state_dir="./client_state", cc="cubic", sim_loss=0.0, sim_delay=0.0):
         self.loop, self.cc, self.sim_loss, self.sim_delay = loop, cc, sim_loss, sim_delay
         self.state_dir = state_dir
@@ -61,6 +70,8 @@ class ClientCore:
                 pass
 
     def snapshot(self):
+        # Ảnh chụp để UI dựng lại toàn bộ màn hình sau khi tải lại trang; chỉ gửi phần đuôi lịch sử để
+        # payload không tăng vô hạn theo thời gian sử dụng.
         return {"status": self.status, "user": self.user, "peers": self.peers, "history": self.history[-300:],
                 "files": self.files[-100:], "stats": self.conn.stats() if self.conn else None, "cc": self.cc,
                 "max_file": self.max_file}
@@ -75,16 +86,16 @@ class ClientCore:
 
     # ------------------------------------------------------------ connection management
     def _verify_server(self, host, port):
+        # TOFU (trust on first use): lần đầu ghi nhớ fingerprint khoá server; lần sau khác -> từ chối (chống MITM).
         def check(pub: bytes):
             fp, key = crypto.fingerprint(pub), f"{host}:{port}"
             known = {}
             if os.path.exists(self.known_hosts):
-                with open(self.known_hosts) as fh:
+                with open(self.known_hosts, encoding="utf-8") as fh:
                     known = json.load(fh)
             if key not in known:                                  # trust on first use (TOFU)
                 known[key] = fp
-                with open(self.known_hosts, "w") as fh:
-                    json.dump(known, fh)
+                atomic_write_json(self.known_hosts, known)        # ghi nguyên tử: không hỏng file pin khi crash
                 self.emit("notice", level="info", text=f"New server pinned: {fp}")
             elif known[key] != fp:
                 raise ConnectionError(f"SERVER KEY CHANGED for {key} (possible man-in-the-middle). "
@@ -106,7 +117,7 @@ class ClientCore:
         ep = Endpoint(self.loop, ("0.0.0.0", 0), cc=self.cc, sim_loss=self.sim_loss, sim_delay=self.sim_delay)
         try:
             conn = await ep.connect(addr, verify=self._verify_server(host, port))
-        except Exception:
+        except BaseException:                                     # kể cả CancelledError: không để rò socket
             ep.close()
             self.status = "offline"
             self.emit("status", status=self.status)
@@ -120,8 +131,10 @@ class ClientCore:
         conn.send(sid, pack({"t": "AUTH", "user": user, "pass": password}))
         try:
             res = await asyncio.wait_for(self._auth_fut, 8)
-        except Exception:
-            await self._disconnect(announce=False)
+        except BaseException:
+            # Chỉ dọn kết nối của lần _connect này và KHÔNG tắt `_want_online`: lỗi xác thực tạm thời
+            # (timeout, rớt mạng giữa chừng) không được làm vòng tự kết nối lại dừng hẳn.
+            await self._abandon(ep, conn)
             raise
         self.user, self.peers, self.status = res["user"], res["peers"], "online"
         self.max_file = res.get("max_file")
@@ -144,8 +157,24 @@ class ClientCore:
                     pass
         self.rx.clear()
 
+    async def _abandon(self, ep, conn):
+        """Huỷ kết nối dở dang của một lần `_connect` mà không ảnh hưởng tới kết nối của lần khác."""
+        if self.conn is conn:
+            await self._teardown(announce=False)
+        else:
+            conn.close(0, "abandoned")
+            ep.close()
+
     async def _disconnect(self, announce=True):
+        """Ngắt chủ động (logout / đăng nhập lại): tắt luôn cơ chế tự kết nối lại và huỷ tác vụ đang chờ."""
         self._want_online = False
+        task = self._reconnect_task
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()                      # tránh một _connect cũ chạy song song với đăng nhập mới
+        await self._teardown(announce)
+
+    async def _teardown(self, announce=True):
+        """Đóng kết nối + endpoint hiện tại, dọn trạng thái; giữ nguyên `_want_online`."""
         self._stats_on = False
         self._abort_downloads()
         if self.conn and not self.conn.closed:
@@ -186,6 +215,8 @@ class ClientCore:
             self.emit("status", status="offline", reason=reason)
 
     async def _reconnect(self):
+        # Thử kết nối lại với backoff luỹ thừa 1s -> 15s. Lỗi tạm thời thì thử mãi; chỉ dừng khi bị server
+        # từ chối thông tin đăng nhập (AuthRejected) hoặc người dùng chủ động đăng xuất / đăng nhập lại.
         delay = 1.0
         while self._want_online:
             await asyncio.sleep(delay)
@@ -193,9 +224,15 @@ class ClientCore:
                 await self._connect()
                 self.emit("notice", level="info", text="Reconnected to server")
                 return
-            except AuthError as exc:
+            except AuthRejected as exc:
+                # Server từ chối thông tin đăng nhập: dừng hẳn và báo UI. (Trước đây vòng lặp thoát nhưng UI
+                # vẫn hiển thị "reconnecting" mãi mãi.)
                 self.emit("notice", level="error", text=f"Re-login failed: {exc}")
-            except Exception as exc:
+                self._want_online = False
+                self.status, self.user = "offline", None
+                self.emit("status", status="offline", reason=f"Re-login failed: {exc}")
+                return
+            except Exception as exc:                  # lỗi tạm thời (mạng, timeout, đứt giữa chừng): thử lại
                 log.info("reconnect failed: %s", exc)
             delay = min(delay * 2, 15)
             self.status = "reconnecting"
@@ -232,12 +269,12 @@ class ClientCore:
                     self._on_msg(hdr)
                 elif hdr["t"] == "FILE":
                     self._file_start(st, hdr)
-                    self._file_data(st, b"", fin)
+                    self._file_data(st, fin)
                 else:
                     raise ProtocolError("unexpected message")
             elif st["kind"] == "file":
                 st["buf"].feed(data)
-                self._file_data(st, b"", fin)
+                self._file_data(st, fin)
             if fin:
                 self.rx.pop(sid, None)
         except ProtocolError as exc:
@@ -249,7 +286,7 @@ class ClientCore:
         if t == "AUTH_OK" and self._auth_fut and not self._auth_fut.done():
             self._auth_fut.set_result(m)
         elif t == "AUTH_FAIL" and self._auth_fut and not self._auth_fut.done():
-            self._auth_fut.set_exception(AuthError(m.get("msg", "authentication failed")))
+            self._auth_fut.set_exception(AuthRejected(m.get("msg", "authentication failed")))
         elif t == "PEERS":
             self.peers = m["peers"]
             self.emit("peers", peers=self.peers)
@@ -277,6 +314,8 @@ class ClientCore:
         self.emit("msg", **item)
 
     def _unique_path(self, name):
+        # Tránh ghi đè file đã nhận trước đó (cùng tên từ hai người khác nhau): thêm " (n)" trước phần mở rộng.
+        # Cũng kiểm tra cả file `.part` để hai lần nhận song song không tranh nhau cùng một đường dẫn tạm.
         base, ext = os.path.splitext(safe_filename(name))
         path, n = os.path.join(self.download_dir, base + ext), 1
         while os.path.exists(path) or os.path.exists(path + ".part"):
@@ -285,9 +324,15 @@ class ClientCore:
         return path
 
     def _file_start(self, st, hdr):
+        try:
+            size = int(hdr["size"])
+        except (KeyError, TypeError, ValueError):
+            raise ProtocolError("invalid file header")
+        if size < 0:
+            raise ProtocolError("invalid file size")
         path = self._unique_path(hdr.get("name", "file"))
         st.update(kind="file", hdr=hdr, path=path, fh=open(path + ".part", "wb"), sha=hashlib.sha256(),
-                  remaining=int(hdr["size"]), got=0, last_emit=0.0, trailer=None)
+                  remaining=size, got=0, last_emit=0.0, trailer=None)
         item = {"id": hdr.get("id"), "from": hdr.get("from"), "to": self.user, "name": os.path.basename(path),
                 "size": st["remaining"], "ts": time.time(), "mine": False, "status": "active", "done": 0, "dir": "down"}
         self._remember(item, self._fidx, self.files)
@@ -295,7 +340,11 @@ class ClientCore:
         self.emit("file_start", id=item["id"], name=item["name"], size=item["size"], frm=item["from"],
                   to=self.user, dir="down")
 
-    def _file_data(self, st, _unused, fin):
+    def _file_data(self, st, fin):
+        # Thân file là `size` byte thô, theo sau là thông điệp FILE_END chứa SHA-256. Ghi theo từng mảnh
+        # (không giữ cả file trong RAM) và chỉ phát tiến độ tối đa 10 lần/giây để không làm nghẽn UI.
+        # `st["buf"]` có thể chứa cả header, thân và trailer trong cùng một lần callback nên hàm này luôn
+        # lấy tối đa `remaining` byte rồi mới thử đọc FILE_END.
         buf = st["buf"]
         if st["remaining"] > 0 and len(buf.buf):
             chunk = buf.take(min(st["remaining"], len(buf.buf)))
@@ -314,6 +363,7 @@ class ClientCore:
             self._file_finish(st)
 
     def _file_finish(self, st):
+        # Chỉ chấp nhận file khi đủ byte VÀ băm khớp; ngược lại xoá file tạm (không để lại file hỏng cho người dùng).
         st["fh"].close()
         hdr, path = st["hdr"], st["path"]
         ok = st["remaining"] == 0 and st["trailer"] and st["trailer"].get("sha256") == st["sha"].hexdigest()
@@ -338,6 +388,8 @@ class ClientCore:
         return self.conn
 
     def send_message(self, to, text):
+        # Mỗi tin là một stream riêng (mở + FIN ngay) nên không phải chờ tin trước hay file lớn gửi xong.
+        # `mid` do client sinh chỉ để đối chiếu SENT/ERR và hiển thị trạng thái gửi.
         conn = self._require()
         mid = uuid.uuid4().hex[:12]
         sid = conn.open_stream(0)
@@ -350,6 +402,8 @@ class ClientCore:
 
     async def send_file(self, to, name, size, chunks, fid=None):
         """`chunks` is an async iterator of bytes (exactly `size` bytes in total)."""
+        # Mỗi file một stream ưu tiên thấp (1). `conn.drain` tạo back-pressure: tạm dừng đọc từ trình duyệt
+        # khi bộ đệm gửi đầy, nên RAM không tăng theo kích thước file. Tiến độ tính theo byte ĐÃ ĐƯỢC ACK.
         conn = self._require()
         fid = fid or uuid.uuid4().hex[:12]
         sid = conn.open_stream(1)
@@ -397,6 +451,7 @@ class ClientCore:
             raise
         finally:
             ptask.cancel()
+            self.aborted.discard(fid)              # dọn cờ huỷ để tập `aborted` không phình mãi
             if not finished and not conn.closed:
                 try:                       # FIN without FILE_END: receiver drops its .part file instead of waiting forever
                     conn.send(sid, b"", fin=True)
@@ -405,5 +460,7 @@ class ClientCore:
         return fid
 
     def open_download(self, name):
+        # `safe_filename` bỏ mọi thành phần đường dẫn, nên tên do trình duyệt gửi lên không thể thoát khỏi
+        # thư mục downloads (chống path traversal qua /api/download/..%2f..).
         path = os.path.join(self.download_dir, safe_filename(name))
         return path if os.path.isfile(path) else None

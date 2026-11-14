@@ -2,6 +2,9 @@
 
 Run:  python -m client.main --ui-port 8080
 Then open http://127.0.0.1:8080 in a browser.
+
+Tiếng Việt: điểm khởi chạy client. Mỗi tiến trình = một người dùng, có thư mục trạng thái riêng
+(`client_state_<ui-port>`) chứa file đã nhận và khoá server đã ghim.
 """
 import argparse
 import asyncio

@@ -21,7 +21,6 @@ import asyncio
 import bisect
 import itertools
 import logging
-import os
 import random
 import socket
 import struct
@@ -34,6 +33,7 @@ from .rangeset import RangeSet
 
 log = logging.getLogger("collabnet.transport")
 
+# Các hằng số điều chỉnh (đơn vị: byte / giây). Phần lớn lấy theo RFC 9002 (QUIC loss detection).
 STREAM_WINDOW = 512 * 1024      # initial / rolling per-stream receive window
 MAX_ACK_DELAY = 0.025
 GRANULARITY = 0.001
@@ -51,7 +51,12 @@ MAX_TRACKED_RANGES = 64
 
 # ====================================================================== streams
 class SendStream:
-    """Sender side of a stream: byte buffer + selective-retransmission bookkeeping."""
+    """Sender side of a stream: byte buffer + selective-retransmission bookkeeping.
+
+    Giữ các byte chưa được ACK trong `data` (bắt đầu tại offset `base`). `next` là offset byte chưa từng gửi,
+    `retx` là các khoảng byte đã bị coi là mất và cần gửi lại, `acked` là các khoảng đã được ACK (có thể
+    ACK không theo thứ tự). Nhờ vậy chỉ phần thật sự thiếu mới bị gửi lại.
+    """
 
     def __init__(self, sid: int, priority: int = 0):
         self.sid, self.priority, self.served = sid, priority, 0
@@ -75,6 +80,8 @@ class SendStream:
         return len(self.data)
 
     def has_data(self) -> bool:
+        # Bỏ các khoảng retx đã được ACK (có thể xảy ra khi gói gửi lại và ACK gốc về cùng lúc),
+        # sau đó còn dữ liệu nếu có phần cần gửi lại, phần chưa gửi trong hạn flow-control, hoặc FIN chưa gửi.
         while self.retx and not self.acked.missing(*self.retx[0]):
             self.retx.pop(0)
         if self.retx:
@@ -85,6 +92,7 @@ class SendStream:
 
     def next_frame(self, max_len: int):
         """Return (offset, bytes, fin) for the next STREAM frame, or None."""
+        # Ưu tiên gửi lại phần bị mất (retx) trước, rồi mới gửi dữ liệu mới trong giới hạn flow-control `max_data`.
         while self.retx:
             s, e = self.retx.pop(0)
             pieces = self.acked.missing(s, e)
@@ -111,6 +119,8 @@ class SendStream:
         return None
 
     def on_acked(self, off: int, ln: int, fin: bool):
+        # ACK có thể đến không theo thứ tự: chỉ giải phóng bộ đệm phần liền mạch từ `base` trở đi,
+        # nhờ vậy `data` không phình theo kích thước file khi các gói cuối về trước.
         self.acked.add(off, off + ln)
         if fin:
             self.fin_acked = True
@@ -130,7 +140,11 @@ class SendStream:
 
 
 class RecvStream:
-    """Receiver side: re-orders out-of-order segments, tracks the flow-control window."""
+    """Receiver side: re-orders out-of-order segments, tracks the flow-control window.
+
+    Đoạn đến không đúng thứ tự được giữ trong `ooo` (sắp theo offset) và chỉ chuyển lên ứng dụng khi đã liền mạch.
+    Mỗi stream có cửa sổ nhận riêng (`adv_max`): bên gửi vượt quá sẽ bị coi là vi phạm flow-control.
+    """
 
     def __init__(self, sid: int):
         self.sid = sid
@@ -167,17 +181,25 @@ class RecvStream:
 
 
 class SentPacket:
+    # Thông tin cần cho phát hiện mất gói và cho mẫu tốc độ giao hàng (delivery rate sample) của BBR.
     __slots__ = ("pn", "time", "size", "frames", "delivered", "delivered_time", "first_sent", "app_limited")
 
 
 # ================================================================== connection
 class Connection:
-    """One secure association between two endpoints (client <-> server)."""
+    """One secure association between two endpoints (client <-> server).
+
+    Trách nhiệm chính: (1) đóng gói/giải mã gói tin AES-GCM, (2) ghép/tách stream, (3) phát hiện mất gói và
+    gửi lại có chọn lọc, (4) điều tốc bằng cwnd + pacing, (5) timer (PTO, idle, keep-alive, ACK trễ).
+    Mọi thao tác chạy trên event loop asyncio, không dùng thread nên không cần khoá.
+    API công khai cho tầng trên: open_stream, send, drain, send_done, consume, close, stats.
+    """
 
     def __init__(self, ep: "Endpoint", is_client: bool, peer_addr, cid: int, peer_cid: int,
                  send_key: bytes, recv_key: bytes, cc: str = "cubic"):
         self.ep, self.loop, self.is_client = ep, ep.loop, is_client
         self.peer_addr, self.cid, self.peer_cid = peer_addr, cid, peer_cid
+        # Hai khoá riêng cho hai chiều: nonce AES-GCM (= số thứ tự gói) không bao giờ trùng với cùng một khoá.
         self.send_cipher, self.recv_cipher = crypto.PacketCipher(send_key), crypto.PacketCipher(recv_key)
         self.cc = make_cc(cc)
         now = self.loop.time()
@@ -206,7 +228,9 @@ class Connection:
         # --- streams
         self.send_streams: dict[int, SendStream] = {}
         self.recv_streams: dict[int, RecvStream] = {}
-        self.finished_recv: set[int] = set()
+        # Các stream nhận đã kết thúc, lưu theo chỉ số `sid >> 1` (peer luôn cấp id cùng tính chẵn/lẻ, cách nhau 2)
+        # trong RangeSet: các id liên tiếp gộp thành một khoảng nên bộ nhớ không tăng theo số tin nhắn.
+        self.finished_recv = RangeSet()
         self._next_sid = 0 if is_client else 1      # client opens even ids, server odd ids
         self._tick = itertools.count(1)
         # --- state
@@ -315,6 +339,9 @@ class Connection:
 
     # ------------------------------------------------------------ receive path
     def on_datagram(self, hdr: bytes, pn: int, ct: bytes, addr):
+        # Luồng xử lý gói đến: giải mã (sai tag -> bỏ lặng lẽ) -> loại gói trùng/replay -> xử lý từng frame
+        # -> lên lịch ACK -> thử gửi tiếp. Địa chỉ nguồn chỉ được cập nhật SAU khi giải mã thành công,
+        # nên kẻ giả mạo không thể "kéo" kết nối sang địa chỉ khác.
         if self.closed:
             return
         try:
@@ -367,8 +394,8 @@ class Connection:
         self._flush()
 
     def _on_stream_frame(self, sid: int, off: int, data: bytes, fin: bool):
-        if sid in self.finished_recv:
-            return
+        if self.finished_recv.contains(sid >> 1):
+            return                               # stream đã kết thúc: bỏ qua gói trùng / đến muộn
         if (sid % 2 == 0) == self.is_client:     # that id parity belongs to *our* send streams
             return
         rs = self.recv_streams.get(sid)
@@ -396,13 +423,14 @@ class Connection:
             self.consume(sid, len(chunk))
         if fin_now:
             self.recv_streams.pop(sid, None)
-            self.finished_recv.add(sid)
+            self.finished_recv.add(sid >> 1, (sid >> 1) + 1)
 
     # ------------------------------------------------------------ ACK / loss handling
     def _on_ack(self, ranges, delay_us: int, now: float):
+        # ACK do peer gửi nên phải kiểm tra: dải vượt quá số gói đã gửi là vô lý (peer lỗi hoặc độc hại).
         if ranges[0][1] >= self.next_pn:
             return                                # acknowledges something we never sent
-        acked = [p for pn, p in self.sent.items() if any(s <= pn <= e for s, e in ranges)]
+        acked = self._packets_in_ranges(ranges)
         if not acked:
             return
         largest = max(p.pn for p in acked)
@@ -427,13 +455,34 @@ class Connection:
         self._detect_loss(now)
         self._check_drain()
 
+    def _packets_in_ranges(self, ranges) -> list:
+        """Các gói đang chờ ACK (`self.sent`) có packet number nằm trong `ranges` (đoạn đóng [s, e]).
+
+        Cách cũ quét toàn bộ `sent` cho từng ACK (O(|sent| x |ranges|), chiếm hơn một nửa thời gian CPU của
+        một lần truyền file lớn qua CUBIC). Ở đây mỗi khoảng ACK nhỏ được tra trực tiếp theo packet number;
+        chỉ khi khoảng lớn hơn số gói đang bay mới quét `sent`. Dùng dict theo pn để các khoảng chồng lấn
+        (peer lỗi / độc hại) không làm một gói bị xử lý hai lần.
+        """
+        sent, found = self.sent, {}
+        for s, e in ranges:
+            if e - s < len(sent):
+                for pn in range(s, e + 1):
+                    p = sent.get(pn)
+                    if p is not None:
+                        found[pn] = p
+            else:
+                for pn, p in sent.items():
+                    if s <= pn <= e:
+                        found[pn] = p
+        return list(found.values())
+
     def _on_packet_acked(self, p: SentPacket, now: float, rtt):
         del self.sent[p.pn]
         self.bytes_in_flight -= p.size
         self.delivered += p.size
         self.delivered_time = now
         self.first_sent_time = p.time
-        interval = max(p.time - p.first_sent, now - p.delivered_time, 1e-6)
+        interval = max(p.time - p.first_sent, now - self.delivered_time, 1e-6)
         sample = RateSample((self.delivered - p.delivered) / interval, p.delivered, p.app_limited)
         self.cc.on_ack(now, p.size, p.time, rtt, sample, self.bytes_in_flight, self.srtt)
         for f in p.frames:
@@ -478,6 +527,8 @@ class Connection:
                 self._safe_cb(cb)
 
     def _detect_loss(self, now: float):
+        # Một gói bị coi là mất khi: có gói gửi sau nó từ 3 vị trí trở lên đã được ACK (ngưỡng gói),
+        # hoặc đã quá 9/8 RTT kể từ lúc gửi (ngưỡng thời gian). Gói chưa đủ điều kiện đặt `loss_time` để hẹn kiểm tra lại.
         if self.largest_acked < 0:
             return
         loss_delay = max(TIME_THRESHOLD * max(self.srtt or INITIAL_RTT, self.latest_rtt), GRANULARITY)
@@ -558,6 +609,9 @@ class Connection:
         return [(a, b - 1) for a, b in reversed(self.recv_ranges.r)][:MAX_ACK_RANGES]
 
     def _build(self, now: float, allow_data: bool):
+        # Lắp một datagram: ACK (nếu cần) + PING + cấp thêm credit + các frame STREAM. Các stream được duyệt
+        # theo (độ ưu tiên, lần phục vụ gần nhất) nên tin nhắn (ưu tiên 0) luôn đi trước file (ưu tiên 1)
+        # và các stream cùng mức luân phiên công bằng. Trả về None nếu không có gì để gửi.
         budget = MAX_PAYLOAD
         ack_part = None
         if self.ack_deadline is not None:
@@ -635,6 +689,7 @@ class Connection:
 
     # ------------------------------------------------------------ timers
     def _pto_interval(self) -> float:
+        # Probe Timeout (RFC 9002): srtt + 4*rttvar + max_ack_delay, nhân đôi sau mỗi lần PTO liên tiếp (tối đa 2^6).
         srtt = self.srtt if self.srtt is not None else INITIAL_RTT
         var = self.rttvar if self.rttvar is not None else INITIAL_RTT / 2
         return (srtt + max(4 * var, GRANULARITY) + MAX_ACK_DELAY) * (2 ** min(self.pto_count, 6))
@@ -662,6 +717,7 @@ class Connection:
         self._timer = self.loop.call_at(max(when, self.loop.time()), self._on_timer)
 
     def _on_timer(self):
+        # Một timer duy nhất phục vụ: idle timeout, kiểm tra mất gói theo thời gian, PTO (gửi probe), keep-alive.
         self._timer = self._timer_when = None
         if self.closed:
             return
@@ -702,7 +758,18 @@ class Connection:
 
 # ==================================================================== endpoint
 class Endpoint:
-    """Owns the raw UDP socket, demultiplexes datagrams to connections, runs the handshake."""
+    """Owns the raw UDP socket, demultiplexes datagrams to connections, runs the handshake.
+
+    Một Endpoint = một socket UDP. Gói đến được chuyển cho Connection theo connection id đích trong header
+    (nhờ vậy client đổi địa chỉ vẫn giữ được kết nối). `sim_loss/sim_delay/sim_jitter` mô phỏng mạng xấu để kiểm thử.
+    Lưu ý đã biết: server chưa có "retry token" nên Initial giả mạo có thể chiếm tối đa `max_conns` slot trong
+    IDLE_TIMEOUT giây (xem báo cáo, mục Remaining Issues).
+
+    Có hai cách đọc socket vì asyncio trên Windows mặc định là ProactorEventLoop và loop đó không hỗ trợ
+    `add_reader()` (SelectorEventLoop thì có). Endpoint tự chọn: `add_reader` nếu được, ngược lại một task
+    `sock_recvfrom`. Nhờ vậy thư viện chạy được cả với `asyncio.run()` trên Windows, không chỉ khi ứng dụng
+    tự tạo SelectorEventLoop như `server.main()` / `client.main()`.
+    """
 
     def __init__(self, loop, bind=("0.0.0.0", 0), identity=None, cc="cubic", sim_loss=0.0, sim_delay=0.0,
                  sim_jitter=0.0, max_conns=512):
@@ -722,7 +789,12 @@ class Endpoint:
                 pass
         self.sock.bind(bind)
         self.addr = self.sock.getsockname()
-        loop.add_reader(self.sock.fileno(), self._on_readable)
+        # Chọn cơ chế đọc phù hợp với loại event loop đang chạy (xem docstring của class).
+        self._read_task = None
+        try:
+            loop.add_reader(self.sock.fileno(), self._on_readable)
+        except (NotImplementedError, AttributeError):      # ProactorEventLoop (mặc định trên Windows)
+            self._read_task = loop.create_task(self._read_loop())
 
     # ---- plumbing
     def _new_cid(self) -> int:
@@ -732,6 +804,8 @@ class Endpoint:
                 return c
 
     def _on_readable(self):
+        # Đường đọc của SelectorEventLoop: xử lý tối đa 512 datagram mỗi lần được báo để nhường lại cho timer/
+        # tác vụ khác (vẫn còn gói thì level-triggered sẽ gọi lại ngay).
         for _ in range(512):
             try:
                 data, addr = self.sock.recvfrom(2048)
@@ -739,10 +813,28 @@ class Endpoint:
                 return
             except OSError:
                 continue                              # e.g. ICMP port-unreachable surfaced on Windows
+            self._handle(data, addr)
+
+    async def _read_loop(self):
+        """Đường đọc dự phòng cho loop không hỗ trợ `add_reader` (ProactorEventLoop trên Windows)."""
+        while True:
             try:
-                self._dispatch(data, addr)
-            except Exception:
-                log.exception("error while handling datagram from %s", addr)
+                data, addr = await self.loop.sock_recvfrom(self.sock, 2048)
+            except asyncio.CancelledError:
+                raise
+            except OSError:
+                if self.sock.fileno() < 0:
+                    return                            # endpoint đã đóng -> kết thúc task
+                await asyncio.sleep(0.01)             # lỗi tạm thời: chờ ngắn, tránh vòng lặp ăn CPU
+                continue
+            self._handle(data, addr)
+
+    def _handle(self, data: bytes, addr):
+        # Một điểm duy nhất bắt lỗi khi xử lý datagram: gói hỏng không được làm chết task đọc.
+        try:
+            self._dispatch(data, addr)
+        except Exception:
+            log.exception("error while handling datagram from %s", addr)
 
     def send_datagram(self, data: bytes, addr):
         if self.sim_loss and random.random() < self.sim_loss:
@@ -767,10 +859,13 @@ class Endpoint:
     def close(self):
         for c in list(self.conns.values()):
             c._terminate("endpoint closed")
+        if self._read_task is not None:
+            self._read_task.cancel()
+            self._read_task = None
         try:
             self.loop.remove_reader(self.sock.fileno())
         except Exception:
-            pass
+            pass                                      # loop không hỗ trợ reader / socket đã đóng
         self.sock.close()
 
     # ---- demultiplexing
@@ -789,6 +884,8 @@ class Endpoint:
 
     # ---- server side of the handshake
     def _on_initial(self, data: bytes, addr):
+        # Server nhận ClientHello (cid client + khoá X25519): sinh khoá tạm, ký bản ghi bắt tay bằng khoá Ed25519
+        # của server, dẫn xuất khoá phiên rồi trả ServerHello. Initial gửi lại (do mất gói) nhận lại đúng bản trả lời cũ.
         body = data[HDR_LEN:]
         if len(body) != 36:
             return
@@ -821,6 +918,8 @@ class Endpoint:
 
     # ---- client side of the handshake
     async def connect(self, addr, verify=None, timeout: float = 6.0) -> Connection:
+        # Client gửi Initial và gửi lại với backoff (0.25s -> 1s) cho tới khi nhận ServerHello hoặc hết `timeout`.
+        # `verify(static_pub)` do ứng dụng cung cấp (ghim TOFU); ném lỗi nếu khoá server không được tin.
         cpriv, cpub = crypto.new_ephemeral()
         ccid = self._new_cid()
         fut = self.loop.create_future()
@@ -841,6 +940,9 @@ class Endpoint:
             self._hs = None
 
     def _on_handshake(self, data: bytes, addr):
+        # Xác thực ServerHello: chữ ký Ed25519 trên transcript (gồm cả hai khoá tạm và hai connection id)
+        # rồi mới gọi `verify` (ghim TOFU của ứng dụng). Sai chữ ký/khoá lạ -> đánh thức `fut` bằng lỗi,
+        # không bao giờ thiết lập khoá phiên từ một bản bắt tay không tin được.
         ccid, cpriv, cpub, _haddr, fut, verify = self._hs
         _, cid, _ = HDR.unpack_from(data)
         body = data[HDR_LEN:]

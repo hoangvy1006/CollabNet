@@ -13,7 +13,7 @@ import re
 import struct
 import os
 
-MAX_MSG = 1 << 20
+MAX_MSG = 1 << 20                 # kích thước tối đa của MỘT thông điệp JSON (chặn client gửi độ dài khổng lồ)
 MAX_TEXT = 8192
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{2,24}$")
 DISCOVERY_PORT = 9998
@@ -29,7 +29,11 @@ def pack(obj: dict) -> bytes:
 
 
 class MsgBuffer:
-    """Incremental decoder of length-prefixed JSON messages, with raw-byte take-over for file bodies."""
+    """Incremental decoder of length-prefixed JSON messages, with raw-byte take-over for file bodies.
+
+    Dữ liệu stream đến theo từng mảnh bất kỳ nên không đảm bảo trùng ranh giới thông điệp: `feed` gom byte,
+    `pop` chỉ trả thông điệp khi đã đủ. Với file, sau thông điệp FILE phần thân là byte thô nên dùng `take`.
+    """
 
     def __init__(self):
         self.buf = bytearray()
@@ -64,7 +68,14 @@ class MsgBuffer:
         return self.take(len(self.buf))
 
 
+# Tên thiết bị đặc biệt của Windows: không thể tạo file có tên (hoặc phần trước dấu chấm đầu tiên) như vậy.
+_WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+
+
 def safe_filename(name: str) -> str:
+    """Làm sạch tên file do người gửi cung cấp: bỏ đường dẫn, ký tự cấm, tên thiết bị Windows; giới hạn 120 ký tự."""
     name = os.path.basename(str(name).replace("\\", "/"))
     name = re.sub(r"[\x00-\x1f<>:\"|?*]", "_", name).strip(". ")
+    if name.split(".", 1)[0].upper() in _WINDOWS_RESERVED:
+        name = "_" + name                     # vd. "nul.txt" -> "_nul.txt" (mở "nul.txt" trên Windows sẽ thất bại)
     return name[:120] or "file"

@@ -53,7 +53,7 @@ python -m client.main --ui-port 8080 --cc bbr --sim-loss 0.05 --sim-delay-ms 20
 
 ## 5. Kiểm thử tự động
 ```bash
-python -m unittest discover -s tests -t . -v        # 31 test, ~55 giây
+python -m unittest discover -s tests -t . -v        # 49 test (khoảng 1 phút trên Linux, lâu hơn trên Windows)
 python docs/benchmark.py                            # CUBIC vs BBR
 python docs/build_report.py                         # sinh lại docs/report.pdf (cần reportlab, matplotlib)
 ```
@@ -64,6 +64,8 @@ common/transport.py   Connection + Endpoint: stream, ACK/SACK, loss recovery, fl
 common/congestion.py  CUBIC và BBR + pacing          common/crypto.py   X25519/Ed25519/HKDF/AES-GCM/PBKDF2
 common/packet.py      định dạng gói + frame          common/protocol.py thông điệp ứng dụng (JSON có độ dài)
 common/discovery.py   beacon broadcast / dò server   server/server.py   xác thực, presence, định tuyến, relay file
+                      server/users.py   kho tài khoản (PBKDF2) + ghi file nguyên tử
+common/fsutil.py      ghi file nguyên tử (users.json, known_hosts, khoá server)
 client/core.py        logic mạng phía client         client/gateway.py  HTTP/SSE server tự viết (raw TCP)
 client/web/           UI (index.html, app.js, style.css, fonts/)      tests/  docs/report.pdf
 ```
@@ -80,4 +82,4 @@ client/web/           UI (index.html, app.js, style.css, fonts/)      tests/  do
 | 7 | Chịu lỗi: timeout, ngắt kết nối, thoát êm | PTO/idle/keep-alive, auto-reconnect, CLOSE |
 | 8 | Mã hoá payload | AES-256-GCM từng gói, X25519 + chữ ký Ed25519 |
 | 9 | UI HTTP + JS phía client | `client/web`, tiến trình file, danh sách online |
-| 10 | Kiểm thử & chất lượng mã | `tests/` (19 test), mô phỏng mất gói/trễ |
+| 10 | Kiểm thử & chất lượng mã | `tests/` (49 test, gồm `test_regressions.py`), mô phỏng mất gói/trễ |

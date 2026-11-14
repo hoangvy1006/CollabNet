@@ -1,0 +1,6 @@
+# Dữ liệu chạy / bí mật: KHÔNG commit (chứa khoá riêng Ed25519 của server và băm mật khẩu người dùng)
+server_data/
+client_state*/
+__pycache__/
+*.pyc
+.venv/

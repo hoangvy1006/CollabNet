@@ -5,11 +5,15 @@ A tiny HTTP/1.1 server written directly on asyncio TCP streams (no web framework
   * JSON API (fetch/XHR)            * Server-Sent Events for live updates (plain HTTP)
   * streamed file upload with back-pressure into the UDP transport
 
+Tiếng Việt: cổng HTTP cục bộ cho trình duyệt. Tự viết trên asyncio TCP (không dùng framework): phục vụ file tĩnh,
+API JSON, SSE để đẩy sự kiện realtime và nhận upload dạng stream (không đọc cả file vào RAM).
+
 Security: bound to 127.0.0.1 by default, Host header check (DNS-rebinding), and a custom
 `X-Requested-With` header is required on every POST (blocks cross-site form posts).
 """
 import asyncio
 import json
+import logging
 import mimetypes
 import os
 import urllib.parse
@@ -19,6 +23,7 @@ from common.protocol import MAX_TEXT, safe_filename
 
 from .core import AuthError
 
+log = logging.getLogger("collabnet.gateway")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 STATIC = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/style.css": "style.css"}
 FONT_DIR = os.path.join(WEB_DIR, "fonts")
@@ -30,6 +35,8 @@ MAX_UPLOAD = 2 * 1024 ** 3
 
 
 class HttpError(Exception):
+    """Lỗi có mã HTTP rõ ràng; `_handle` chuyển thành phản hồi JSON {"ok": false, "error": ...}."""
+
     def __init__(self, status, msg):
         super().__init__(msg)
         self.status, self.msg = status, msg
@@ -45,15 +52,20 @@ class Gateway:
         self.server = None
 
     async def start(self):
+        # Cổng 0 = để hệ điều hành chọn cổng trống (dùng trong kiểm thử); sau khi start, `self.port` là cổng thật
+        # và là cổng được đưa vào URL cho người dùng.
         self.server = await asyncio.start_server(self._handle, self.host, self.port)
         self.port = self.server.sockets[0].getsockname()[1]
 
     def close(self):
+        # Chỉ đóng listener: các kết nối SSE đang mở sẽ tự kết thúc khi trình duyệt ngắt hoặc tiến trình thoát.
         if self.server:
             self.server.close()
 
     # ------------------------------------------------------------ HTTP plumbing
     async def _handle(self, reader, writer):
+        # Mỗi kết nối TCP phục vụ đúng một request (Connection: close). Kiểm tra Host (chống DNS rebinding) và
+        # header X-Requested-With cho POST (trình duyệt không tự gắn header này trong form cross-site -> chống CSRF).
         try:
             req = await self._read_head(reader)
             if req is None:
@@ -69,9 +81,10 @@ class Gateway:
             await self._send_json(writer, {"ok": False, "error": exc.msg}, exc.status)
         except (ConnectionError, asyncio.IncompleteReadError):
             pass
-        except Exception as exc:                       # never crash the gateway
+        except Exception:                              # never crash the gateway
+            log.exception("unhandled error while serving request")   # chi tiết ở log, không trả ra trình duyệt
             try:
-                await self._send_json(writer, {"ok": False, "error": str(exc)}, 500)
+                await self._send_json(writer, {"ok": False, "error": "internal error"}, 500)
             except Exception:
                 pass
         finally:
@@ -95,6 +108,8 @@ class Gateway:
         return name in allowed
 
     async def _read_head(self, reader):
+        # Đọc request line + header tới dòng trống. Giới hạn tổng kích thước header để một client cục bộ
+        # (hoặc trang web lạ) không thể gửi header vô hạn làm tốn bộ nhớ.
         line = await reader.readline()
         if not line:
             return None
@@ -104,17 +119,18 @@ class Gateway:
             raise HttpError(400, "bad request line")
         headers, total = {}, 0
         while True:
-            l = await reader.readline()
-            total += len(l)
-            if l in (b"\r\n", b"\n", b""):
+            raw = await reader.readline()
+            total += len(raw)
+            if raw in (b"\r\n", b"\n", b""):
                 break
             if total > 65536:
                 raise HttpError(400, "headers too large")
-            k, _, v = l.decode("latin1").partition(":")
+            k, _, v = raw.decode("latin1").partition(":")
             headers[k.strip().lower()] = v.strip()
         return method, target, headers
 
     async def _send(self, writer, status, body: bytes, ctype, extra=None):
+        # Mặc định no-store + nosniff: dữ liệu chat/file không được cache lại và trình duyệt không tự đoán kiểu.
         hdrs = {"Content-Type": ctype, "Content-Length": len(body), "Connection": "close", "Cache-Control": "no-store",
                 "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", **(extra or {})}
         head = [f"HTTP/1.1 {status} {REASONS.get(status, '')}"] + [f"{k}: {v}" for k, v in hdrs.items()]
@@ -126,7 +142,12 @@ class Gateway:
 
     @staticmethod
     async def _read_json(reader, headers):
-        n = int(headers.get("content-length", 0))
+        try:
+            n = int(headers.get("content-length", 0))
+        except ValueError:
+            raise HttpError(400, "invalid Content-Length")
+        if n < 0:
+            raise HttpError(400, "invalid Content-Length")
         if n > 1 << 20:
             raise HttpError(413, "body too large")
         try:
@@ -138,6 +159,7 @@ class Gateway:
     async def _route(self, method, url, headers, reader, writer):
         core, path = self.core, url.path
         if method == "GET" and path in STATIC:
+            # Chỉ phục vụ danh sách file cố định (whitelist) nên không thể đọc file ngoài thư mục web/.
             with open(os.path.join(WEB_DIR, STATIC[path]), "rb") as fh:
                 body = fh.read()
             ctype = (mimetypes.guess_type(STATIC[path])[0] or "text/plain") + "; charset=utf-8"
@@ -189,6 +211,8 @@ class Gateway:
         raise HttpError(404, "not found")
 
     async def _sse(self, writer):
+        # Server-Sent Events: giữ kết nối mở, mỗi sự kiện của ClientCore là một khối "event:/data:". Gửi dòng chú thích
+        # ": keep-alive" mỗi 15s để proxy không ngắt và để phát hiện trình duyệt đã đóng tab.
         writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n"
                      b"Connection: keep-alive\r\n\r\n")
         q = self.core.subscribe()
@@ -204,6 +228,8 @@ class Gateway:
             self.core.unsubscribe(q)
 
     async def _download(self, writer, name, inline=False):
+        # Ảnh xem trước được phép hiển thị inline nhưng luôn kèm CSP "sandbox": nếu file độc hại thì nó chạy
+        # trong một origin riêng, không đọc được dữ liệu của ứng dụng. Mọi loại khác buộc tải về (attachment).
         path = self.core.open_download(name)
         if not path:
             raise HttpError(404, "file not found")
@@ -221,10 +247,13 @@ class Gateway:
                 await writer.drain()
 
     async def _upload(self, headers, reader, writer):
+        # Thân request là nội dung file thô; tên file/người nhận nằm trong header X-Filename / X-To (đã percent-encode).
         try:
             size = int(headers.get("content-length", ""))
         except ValueError:
             raise HttpError(400, "Content-Length required")
+        if size < 0:
+            raise HttpError(400, "invalid Content-Length")
         if size > MAX_UPLOAD:
             raise HttpError(413, "file too large")
         to = urllib.parse.unquote(headers.get("x-to", ""))
