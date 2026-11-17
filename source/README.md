@@ -53,20 +53,35 @@ Cách dùng UI:
 > Lần đầu kết nối, client ghim (TOFU) fingerprint của server. Nếu khoá đổi, client **từ chối** kết nối (chống MITM).
 > Muốn tin khoá mới: xoá mục tương ứng trong `known_hosts.json`.
 
-## 4. Mô phỏng mạng xấu (kiểm thử)
+## 4. Đặt lại dữ liệu (reset)
+Xoá toàn bộ tài khoản và lịch sử chat để server trở về trạng thái như lần chạy đầu (dùng trước buổi kiểm thử):
+```bash
+python -m server.reset --dry-run      # xem trước sẽ xoá gì, không xoá thật
+python -m server.reset                # hỏi xác nhận rồi xoá users.json, first_seen.json, history.json
+python -m server.reset -y             # không hỏi xác nhận
+```
+Mặc định giữ nguyên `server_identity.key` (fingerprint server không đổi); thêm `--with-identity` nếu muốn đổi khoá
+(khi đó client phải xoá mục cũ trong `client_state_<port>/known_hosts.json`).
+
+Script **từ chối chạy** khi cổng UDP của server (`--port`, mặc định 9000) hoặc cổng UI của client
+(`--ui-ports`, mặc định `8080,8081`) còn bận: server đang chạy sẽ ghi đè lại file, còn client còn phiên sẽ tự đăng
+nhập lại và tạo lại tài khoản ngay sau khi reset. Tắt hết server + client rồi chạy lại, hoặc thêm `--force` nếu
+chắc chắn các cổng đó không thuộc CollabNet. `--data-dir` để trỏ tới thư mục dữ liệu khác `./server_data`.
+
+## 5. Mô phỏng mạng xấu (kiểm thử)
 ```bash
 python -m server.server --port 9000 --cc bbr --sim-loss 0.05 --sim-delay-ms 20
 python -m client.main --ui-port 8080 --cc bbr --sim-loss 0.05 --sim-delay-ms 20
 ```
 
-## 5. Kiểm thử tự động
+## 6. Kiểm thử tự động
 ```bash
 python -m unittest discover -s tests -t . -v        # 49 test (khoảng 1 phút trên Linux, lâu hơn trên Windows)
 python docs/benchmark.py                            # CUBIC vs BBR
 python docs/build_report.py                         # sinh lại docs/report.pdf (cần reportlab, matplotlib)
 ```
 
-## 6. Cấu trúc mã nguồn
+## 7. Cấu trúc mã nguồn
 ```
 common/transport.py   Connection + Endpoint: stream, ACK/SACK, loss recovery, flow control, handshake
 common/congestion.py  CUBIC và BBR + pacing          common/crypto.py   X25519/Ed25519/HKDF/AES-GCM/PBKDF2
@@ -74,12 +89,13 @@ common/packet.py      định dạng gói + frame          common/protocol.py th
 common/discovery.py   beacon broadcast / dò server   server/server.py   xác thực, presence, định tuyến, lịch sử chat
                       server/users.py   kho tài khoản (PBKDF2) + ghi file nguyên tử
                       server/history.py lịch sử hội thoại (history.json), gửi lại sau khi đăng nhập
+                      server/reset.py   xoá toàn bộ tài khoản + lịch sử (đặt lại server trước khi kiểm thử)
 common/fsutil.py      ghi file nguyên tử (users.json, known_hosts, khoá server)
 client/core.py        logic mạng phía client         client/gateway.py  HTTP/SSE server tự viết (raw TCP)
 client/web/           UI (index.html, app.js, style.css, fonts/)      tests/  docs/report.pdf
 ```
 
-## 7. Đối chiếu yêu cầu đề bài
+## 8. Đối chiếu yêu cầu đề bài
 | Bước | Nội dung | Vị trí |
 |---|---|---|
 | 1 | Thiết kế giao thức, state diagram | `docs/report.pdf` mục 2, `common/packet.py`, `common/protocol.py` |
