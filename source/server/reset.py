@@ -13,8 +13,11 @@ Mặc định KHÔNG xoá ``server_identity.key``: giữ nguyên fingerprint đ�
 được. Thêm ``--with-identity`` nếu muốn đổi luôn khoá của server (khi đó client phải xoá ``known_hosts.json``
 trong thư mục trạng thái của nó, nếu không sẽ bị từ chối vì fingerprint lạ).
 
-Phải TẮT server trước khi chạy: server đang chạy vẫn giữ users/lịch sử trong RAM và sẽ ghi đè lại file ngay
-sau đó, làm lần reset mất tác dụng. Script tự kiểm tra cổng UDP và từ chối chạy nếu cổng còn bận.
+Phải TẮT server VÀ tất cả client trước khi chạy:
+  * server đang chạy vẫn giữ users/lịch sử trong RAM và sẽ ghi đè lại file ngay sau đó;
+  * client còn mở vẫn giữ phiên đăng nhập cũ, nên khi thấy server "quên" tài khoản nó sẽ tự đăng nhập lại và
+    tạo lại user chỉ trong vài giây.
+Script tự kiểm tra cổng UDP của server và từ chối chạy nếu cổng còn bận.
 """
 import argparse
 import json
