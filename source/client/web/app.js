@@ -194,7 +194,8 @@ const ext = (n) => ((n || "").split(".").pop() || "").slice(0, 4).toUpperCase() 
 function stateText(it) {
   if (it.status === "pending") return "Đang gửi…";
   if (it.status === "failed") return vi(it.error) || "Chưa gửi được";
-  if (it.to === "*") return it.n === 0 ? "Chưa có ai online để nhận" : "Đã gửi tới " + it.n + " người";
+  // Tin khôi phục từ HISTORY không có trường `n` (chỉ tin vừa gửi mới biết số người nhận).
+  if (it.to === "*") return it.n == null ? "Đã gửi" : (it.n === 0 ? "Chưa có ai online để nhận" : "Đã gửi tới " + it.n + " người");
   return "Đã gửi";
 }
 function fillMeta(it, meta) {
