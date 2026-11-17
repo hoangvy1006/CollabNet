@@ -1,7 +1,6 @@
-"""Transport tests: crypto, ranges, reliable streams under loss/delay, HoL-blocking, CC algorithms.
+"""Kiểm thử transport: mã hoá, RangeSet, stream tin cậy trên link mất gói/trễ, chống HoL-blocking, thuật toán CC.
 
-Kiểm thử tầng transport bằng cách ghép hai Endpoint thật trên loopback (không mock), nên bao gồm cả
-mã hoá, ACK/SACK, gửi lại và điều khiển tắc nghẽn chạy đúng như khi triển khai.
+Ghép hai Endpoint thật trên loopback (không mock) nên bắt được cả lỗi tích hợp giữa các tầng.
 """
 import asyncio
 import hashlib
@@ -19,6 +18,8 @@ from common.transport import Endpoint
 
 
 class UnitTests(unittest.TestCase):
+    """Kiểm thử đơn vị: RangeSet, mã hoá/giải mã frame, crypto — không cần mạng."""
+
     def test_rangeset(self):
         r = RangeSet()
         r.add(0, 5); r.add(10, 15); r.add(5, 10)
@@ -54,16 +55,16 @@ class UnitTests(unittest.TestCase):
         ct = c.seal(7, b"hdr", b"secret")
         self.assertEqual(c.open(7, b"hdr", ct), b"secret")
         with self.assertRaises(Exception):
-            c.open(8, b"hdr", ct)           # wrong packet number -> wrong nonce
+            c.open(8, b"hdr", ct)           # sai số thứ tự gói -> sai nonce
         with self.assertRaises(Exception):
-            c.open(7, b"HDR", ct)           # header tampering detected
+            c.open(7, b"HDR", ct)           # phát hiện header bị sửa
         stored = crypto.hash_password("pw", iterations=1000)
         self.assertTrue(crypto.verify_password("pw", stored))
         self.assertFalse(crypto.verify_password("pw2", stored))
 
 
 class Pair:
-    """A connected client/server pair over loopback with optional simulated loss/delay."""
+    """Cặp client/server đã kết nối trên loopback, có thể mô phỏng mất gói/trễ."""
 
     def __init__(self, cc="cubic", loss=0.0, delay=0.0, jitter=0.0):
         self.cc, self.loss, self.delay, self.jitter = cc, loss, delay, jitter
@@ -108,6 +109,8 @@ class Pair:
 
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):
+    """Kiểm thử truyền dữ liệu lớn, chống HoL-blocking, flow-control và phát hiện ngắt kết nối."""
+
     async def _bulk(self, cc, loss, delay, size, jitter=0.0):
         p = await Pair(cc, loss, delay, jitter).start()
         try:
@@ -137,12 +140,12 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         print(f"\n  bbr 5% loss + reordering: {dt:.2f}s", s)
 
     async def test_no_hol_blocking(self):
-        """A tiny message on its own stream must arrive quickly while a big file saturates the link."""
+        """Tin nhắn nhỏ trên stream riêng phải tới nhanh trong khi file lớn đang chiếm hết đường truyền."""
         p = await Pair("cubic", 0.03, 0.02).start()
         try:
             big = p.client.open_stream(1)
             p.client.send(big, os.urandom(3_000_000), fin=True)
-            await asyncio.sleep(0.3)                       # let the file transfer get going
+            await asyncio.sleep(0.3)                       # để lượt truyền file chạy đã
             lat = []
             for i in range(5):
                 sid = p.client.open_stream(0)
@@ -154,15 +157,15 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.05)
             await p.wait_fin(big)
             print("\n  chat latency while file in flight (ms):", [round(x * 1000) for x in lat])
-            self.assertLess(max(lat), 1.5)                 # far less than file transfer time
+            self.assertLess(max(lat), 1.5)                 # nhỏ hơn nhiều so với thời gian truyền file
         finally:
             p.close()
 
     async def test_flow_control_backpressure(self):
-        """Receiver that withholds credit stops the sender at the window size."""
+        """Bên nhận không cấp credit sẽ chặn bên gửi đúng ở kích thước cửa sổ."""
         p = await Pair().start()
         try:
-            p.server_conns[0].on_stream_data = lambda c, sid, data, fin: False   # never consume
+            p.server_conns[0].on_stream_data = lambda c, sid, data, fin: False   # không bao giờ tiêu thụ
             sid = p.client.open_stream()
             p.client.send(sid, os.urandom(2_000_000), fin=True)
             await asyncio.sleep(1.0)

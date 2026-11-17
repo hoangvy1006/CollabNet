@@ -59,6 +59,8 @@ function vi(t) {
   if (/logged in from another/i.test(t)) return "Tài khoản này vừa đăng nhập ở nơi khác.";
   if (/rejected by server/i.test(t)) return "Server từ chối file này.";
   if (/upload interrupted/i.test(t)) return "Đã dừng gửi.";
+  if (/peer key mismatch/i.test(t)) return "Khoá của người nhận đã thay đổi. Đã từ chối kết nối P2P.";
+  if (/peer-to-peer/i.test(t)) return "Không kết nối trực tiếp (P2P) được tới người nhận. Kiểm tra firewall / mạng LAN.";
   return t;
 }
 async function api(path, body) {
@@ -477,6 +479,12 @@ function connectEvents() {
   on("status", (d) => { if (d.user && S.user !== d.user) onLogin(d.user); setStatus(d.status, d.reason); });
   on("peers", (d) => { S.peers = d.peers; renderHead(); schedule("rail"); if (S.active !== "*" && !peerOf(S.active) && !conv(S.active).items.length) openConv("*"); });
   on("msg", (m) => { const r = addItem({ type: "msg", ...m }); if (r.isNew) { notifyIncoming(convKey(r.it), r.it); showNew(r); } schedule("rail"); });
+  /* Lịch sử cũ do server gửi lại sau khi đăng nhập: thêm vào hội thoại nhưng không báo "chưa đọc". */
+  on("history", (d) => {
+    let added = false;
+    for (const m of d.items || []) if (addItem({ type: "msg", ...m }).isNew) added = true;
+    if (added) { schedule("rail"); renderLog(false); }
+  });
   on("sent", (d) => {
     const f = findItem(d.ref); if (!f) return;
     Object.assign(f.it, { status: "sent", n: d.n });

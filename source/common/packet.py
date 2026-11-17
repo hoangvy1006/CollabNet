@@ -1,35 +1,33 @@
-"""Wire format of the CollabNet transport (a small QUIC-like protocol over UDP).
+"""Khuôn dạng gói tin của transport CollabNet (giao thức nhỏ kiểu QUIC trên UDP).
 
-Datagram layout::
+Bố cục một datagram::
 
     +------+-----------+------------------+------------------------------+----------+
-    | type | dest_cid  |  packet number   |  encrypted frames (AES-GCM)  | GCM tag  |
-    | 1 B  |   4 B     |       8 B        |          variable            |  16 B    |
+    | loại | dest_cid  |  số thứ tự gói   |  frame đã mã hoá (AES-GCM)   | GCM tag  |
+    | 1 B  |   4 B     |       8 B        |      độ dài thay đổi         |  16 B    |
     +------+-----------+------------------+------------------------------+----------+
-    \\_________ header (13 B, authenticated as AAD) _________/
+    \\_________ header (13 B, xác thực như AAD) _________/
 
-Frames (inside the encrypted payload)::
+Các frame (nằm trong payload đã mã hoá)::
 
     STREAM  0x02/0x03(FIN)  stream_id:4  offset:8  length:2  data
     ACK     0x04            largest:8 ack_delay_us:4 n:1  n x (range_start:8 range_end:8)
-    MAX_STREAM_DATA 0x05    stream_id:4  max_offset:8       (flow-control credit)
+    MAX_STREAM_DATA 0x05    stream_id:4  max_offset:8       (credit flow-control)
     PING    0x06
     CLOSE   0x07            code:2 reason_len:2 reason
 """
-# Tiếng Việt: module định nghĩa khuôn dạng gói tin của tầng transport tự viết (giống QUIC thu nhỏ).
-# Mỗi datagram UDP = header 13 byte (loại gói, connection id đích, số thứ tự gói) + payload mã hoá AES-GCM.
-# Payload là chuỗi "frame" (STREAM / ACK / MAX_STREAM_DATA / PING / CLOSE). Header được xác thực như AAD nên
-# kẻ tấn công không thể sửa số thứ tự gói hay connection id mà không bị phát hiện.
+# Mỗi datagram UDP = header 13 byte + payload mã hoá AES-GCM (chuỗi frame STREAM/ACK/...).
+# Header được xác thực như AAD nên không thể sửa số thứ tự gói hay connection id mà không bị phát hiện.
 import struct
 
-MAX_DATAGRAM = 1200            # bytes on the wire; stays below typical MTU - headers
-HDR = struct.Struct("!BIQ")    # type, destination connection id, packet number
+MAX_DATAGRAM = 1200            # số byte trên đường truyền; vẫn dưới MTU thông thường sau khi trừ header
+HDR = struct.Struct("!BIQ")    # loại gói, connection id đích, số thứ tự gói
 HDR_LEN = HDR.size             # 13
 TAG_LEN = 16
 
-PT_INITIAL = 0x01              # client hello  (plaintext: client cid + X25519 public key)
-PT_HANDSHAKE = 0x02            # server hello  (plaintext: server cid, key, signature)
-PT_DATA = 0x10                 # encrypted application packet
+PT_INITIAL = 0x01              # chào của client (plaintext: cid client + khoá công khai X25519)
+PT_HANDSHAKE = 0x02            # chào của bên nhận (plaintext: cid, khoá, chữ ký)
+PT_DATA = 0x10                 # gói dữ liệu ứng dụng đã mã hoá
 
 FT_STREAM, FT_STREAM_FIN, FT_ACK, FT_MAX_STREAM_DATA, FT_PING, FT_CLOSE = 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
 STREAM_OVERHEAD = 15
@@ -42,7 +40,7 @@ def enc_stream(sid: int, off: int, data: bytes, fin: bool) -> bytes:
 
 
 def enc_ack(ranges, delay_us: int) -> bytes:
-    """ranges: list of inclusive (start, end) packet-number ranges, highest first."""
+    """`ranges`: danh sách khoảng packet number đóng (start, end), khoảng cao nhất trước."""
     # Frame ACK có chọn lọc (SACK): báo các khoảng packet number đã nhận để bên gửi chỉ gửi lại phần thiếu.
     # `delay_us` là thời gian bên nhận giữ ACK, dùng để hiệu chỉnh RTT.
     out = bytearray(struct.pack("!BQIB", FT_ACK, ranges[0][1], delay_us, len(ranges)))
@@ -69,7 +67,7 @@ def enc_close(code: int, reason: str) -> bytes:
 
 
 def decode_frames(buf: bytes):
-    """Return a list of tuples; raises ValueError on malformed input.
+    """Trả về danh sách tuple; ném ValueError nếu dữ liệu sai định dạng.
 
     ('S', sid, off, data, fin) | ('A', ranges, delay_us) | ('M', sid, max) | ('P',) | ('C', code, reason)
     """

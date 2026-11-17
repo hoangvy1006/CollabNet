@@ -1,4 +1,4 @@
-"""HTTP gateway tests: speak raw HTTP to the gateway exactly like the browser UI does.
+"""Kiểm thử cổng HTTP của client: nói chuyện HTTP thô với gateway giống hệt trình duyệt.
 
 Gửi HTTP thô qua TCP (không dùng client HTTP có sẵn) để kiểm tra đúng những gì trình duyệt gửi:
 Host header, X-Requested-With, upload dạng stream, SSE và các giới hạn bảo mật.
@@ -38,6 +38,8 @@ async def jpost(port, path, obj):
 
 
 class GatewayTests(unittest.IsolatedAsyncioTestCase):
+    """Kiểm thử qua HTTP thật: UI, đăng nhập, chat, upload/download, SSE và các giới hạn bảo mật."""
+
     async def asyncSetUp(self):
         self.tmp = tempfile.mkdtemp()
         loop = asyncio.get_running_loop()
@@ -62,11 +64,11 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(s, 200); self.assertIn(b"CollabNet", body); self.assertIn("Content-Security-Policy", head)
         for path in ("/app.js", "/style.css"):
             self.assertEqual((await http(pa, "GET", path))[0], 200)
-        # security checks
-        self.assertEqual((await http(pa, "POST", "/api/send", {}, b"{}"))[0], 403)          # no X-Requested-With
-        self.assertEqual((await http(pa, "GET", "/api/state", host="evil.com"))[0], 403)    # DNS rebinding
+        # kiểm tra bảo mật
+        self.assertEqual((await http(pa, "POST", "/api/send", {}, b"{}"))[0], 403)          # thiếu X-Requested-With
+        self.assertEqual((await http(pa, "GET", "/api/state", host="evil.com"))[0], 403)    # chống DNS rebinding
         self.assertEqual((await http(pa, "GET", "/api/download/..%2f..%2fetc%2fpasswd"))[0], 404)
-        # login failures / success
+        # đăng nhập sai / đúng
         srv = f"127.0.0.1:{self.server.port}"
         s, d = await jpost(pa, "/api/login", {"server": srv, "user": "alice", "pass": "pw1234"}); self.assertEqual(s, 200)
         s, d = await jpost(pb, "/api/login", {"server": srv, "user": "alice", "pass": "WRONG"}); self.assertEqual(s, 401)
@@ -74,7 +76,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.3)
         s, _, b = await http(pa, "GET", "/api/state")
         st = json.loads(b); self.assertEqual(st["status"], "online"); self.assertEqual(len(st["peers"]), 2)
-        # SSE stream on bob's gateway
+        # luồng SSE trên gateway của bob
         q = self.cores["bob"].subscribe()
         s, d = await jpost(pa, "/api/send", {"to": "bob", "text": "xin chào <b>bob</b>"}); self.assertEqual(s, 200)
         while True:
@@ -82,7 +84,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             if typ == "msg":
                 break
         self.assertEqual(data["text"], "xin chào <b>bob</b>")
-        # streamed upload through HTTP with Content-Length, then download over HTTP
+        # upload dạng stream qua HTTP với Content-Length, rồi tải về qua HTTP
         payload = os.urandom(2_500_000)
         hdr = {**X, "X-To": "bob", "X-Filename": urllib.parse.quote("tài liệu.bin"), "X-File-Id": "abc123"}
         s, _, b = await http(pa, "POST", "/api/upload", hdr, payload)
@@ -93,10 +95,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 break
         s, head, got = await http(pb, "GET", "/api/download/" + urllib.parse.quote(data["name"]))
         self.assertEqual(s, 200); self.assertEqual(hashlib.sha256(got).digest(), hashlib.sha256(payload).digest())
-        # uploading to an offline user is rejected
+        # gửi cho người đang offline bị từ chối
         s, _, b = await http(pa, "POST", "/api/upload", {**hdr, "X-To": "ghost", "X-File-Id": "zzz"}, b"x" * 1000)
         self.assertIn(s, (200, 409))
-        # SSE endpoint answers with event-stream
+        # endpoint SSE trả về event-stream
         r, w = await asyncio.open_connection("127.0.0.1", pa)
         w.write(b"GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
         first = await asyncio.wait_for(r.readuntil(b"\r\n\r\n"), 3)
@@ -110,7 +112,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.3)
         s, head, body = await http(pa, "GET", "/fonts/be-vietnam-pro-vietnamese-400-normal.woff2")
         self.assertEqual(s, 200); self.assertIn("font/woff2", head); self.assertEqual(body[:4], b"wOF2")
-        self.assertEqual((await http(pa, "GET", "/fonts/../app.js"))[0], 404)           # no path traversal
+        self.assertEqual((await http(pa, "GET", "/fonts/../app.js"))[0], 404)           # chặn path traversal
         s, _ = await jpost(pa, "/api/send", {"to": "bob", "text": "x" * 9000}); self.assertEqual(s, 413)
         q = self.cores["bob"].subscribe()
         png = bytes.fromhex("89504e470d0a1a0a") + os.urandom(200)

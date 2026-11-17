@@ -1,6 +1,6 @@
-"""Test hồi quy cho các lỗi / tối ưu được sửa trong đợt rà soát mã nguồn.
+"""Kiểm thử hồi quy cho các lỗi / tối ưu đã sửa trong đợt rà soát mã nguồn.
 
-Mỗi test tương ứng một vấn đề đã tái hiện được trên bản cũ:
+Mỗi kiểm thử ứng với một vấn đề đã tái hiện được trên bản cũ:
   * B1  gửi tin cho peer vừa rớt kết nối làm server đóng nhầm kết nối của người gửi
   * B2  hai gói AUTH chồng nhau để lại user "ma" trong danh sách online
   * B3  tự kết nối lại bị server từ chối nhưng UI kẹt ở trạng thái "reconnecting"
@@ -29,6 +29,8 @@ from tests.test_transport import Pair
 
 
 class ServerFixture(unittest.IsolatedAsyncioTestCase):
+    """Bộ khung dựng server thật + client trong thư mục tạm cho các kiểm thử hồi quy."""
+
     async def asyncSetUp(self):
         self.tmp = tempfile.mkdtemp()
         self.server = Server(asyncio.get_running_loop(), "127.0.0.1", 0, os.path.join(self.tmp, "srv"), beacon=False)
@@ -47,6 +49,8 @@ class ServerFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class ServerRobustnessTests(ServerFixture):
+    """Lỗi B1/B2: gửi tin cho peer vừa rớt không được đóng nhầm người gửi; AUTH chồng nhau không để lại user "ma"."""
+
     async def test_b1_message_to_just_closed_peer_does_not_kick_sender(self):
         await self.login("alice")
         await self.login("bob")
@@ -86,6 +90,8 @@ class ServerRobustnessTests(ServerFixture):
 
 
 class ReconnectTests(ServerFixture):
+    """Lỗi B3: tự kết nối lại khi bị từ chối phải dừng hẳn và báo trạng thái offline cho UI."""
+
     async def test_b3_rejected_relogin_goes_offline_and_stops_retrying(self):
         a = await self.login("alice")
         events = a.subscribe()                                # nhận mọi sự kiện UI phát ra
@@ -118,6 +124,8 @@ class ReconnectTests(ServerFixture):
 
 
 class UserStoreTests(unittest.TestCase):
+    """Kho tài khoản: đăng ký / đăng nhập, lưu xuống đĩa và đăng ký đồng thời cùng một tên."""
+
     def test_register_login_and_messages(self):
         path = os.path.join(tempfile.mkdtemp(), "users.json")
         st = UserStore(path)
@@ -139,6 +147,8 @@ class UserStoreTests(unittest.TestCase):
 
 
 class FsUtilTests(unittest.TestCase):
+    """Ghi file nguyên tử: thay nội dung cũ và không để lại file tạm khi lỗi giữa chừng."""
+
     def test_atomic_write_replaces_and_leaves_no_temp_files(self):
         d = tempfile.mkdtemp()
         p = os.path.join(d, "f.json")
@@ -160,6 +170,8 @@ class FsUtilTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    """Giao thức ứng dụng: tên file an toàn (Windows) và phân cấp ngoại lệ ProtocolError."""
+
     def test_windows_reserved_names(self):
         self.assertEqual(safe_filename("nul.txt"), "_nul.txt")
         self.assertEqual(safe_filename("CON"), "_CON")
@@ -172,6 +184,8 @@ class ProtocolTests(unittest.TestCase):
 
 
 class TransportInternalsTests(unittest.IsolatedAsyncioTestCase):
+    """Tối ưu P1/M1: tra gói theo khoảng ACK nhanh đúng như vét cạn và `finished_recv` không phình."""
+
     async def test_packets_in_ranges_matches_bruteforce(self):
         p = await Pair().start()
         try:
@@ -205,6 +219,8 @@ class TransportInternalsTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BbrWindowedMaxTests(unittest.TestCase):
+    """Tối ưu P2: bộ lọc max theo cửa sổ của BBR phải khớp với cách tính vét cạn."""
+
     def test_matches_bruteforce_window_max(self):
         rnd = random.Random(3)
         bbr, shadow = Bbr(), deque()                        # shadow: cách tính cũ (giữ mọi mẫu, max() mỗi lần)
@@ -224,6 +240,8 @@ class BbrWindowedMaxTests(unittest.TestCase):
 
 
 class GatewayHardeningTests(unittest.IsolatedAsyncioTestCase):
+    """Gateway: Content-Length sai hoặc kích thước upload âm phải trả 400, không phải 500."""
+
     async def asyncSetUp(self):
         self.tmp = tempfile.mkdtemp()
         self.core = ClientCore(asyncio.get_running_loop(), self.tmp + "/c")

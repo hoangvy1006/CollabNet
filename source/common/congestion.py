@@ -1,24 +1,22 @@
-"""Congestion controllers: CUBIC (RFC 8312 / 9438 style) and a compact BBR (v1).
+"""Bộ điều khiển tắc nghẽn: CUBIC (kiểu RFC 8312 / 9438) và BBR v1 thu gọn.
 
-Both implement the same interface so the transport can switch with `--cc`.
-Units: bytes, seconds, bytes/second.  One "segment" == one datagram (MSS).
+Cả hai dùng chung một giao diện nên transport chọn được bằng tham số `--cc`.
+Đơn vị: byte, giây, byte/giây. Một "segment" = một datagram (MSS).
 """
 import random
 from collections import deque
 
 from .packet import MAX_DATAGRAM
 
-# Tiếng Việt: kiểm soát tắc nghẽn quyết định bên gửi được phép có bao nhiêu byte "đang bay" (cwnd) và gửi nhanh
-# tới đâu (pacing). Hai thuật toán dùng chung giao diện nên transport chọn bằng tham số `--cc`:
-#   * CUBIC: dựa trên mất gói, cwnd tăng theo hàm bậc ba quanh điểm w_max (mức cwnd lúc mất gói gần nhất).
-#   * BBR v1: dựa trên mô hình đường truyền (băng thông nghẽn BtlBw, RTT nhỏ nhất RTprop), ít nhạy với mất gói.
+# Tiếng Việt: cwnd = số byte được phép "đang bay"; pacing = tốc độ phát. CUBIC dựa trên mất gói,
+# BBR dựa trên mô hình đường truyền (BtlBw, RTprop) nên ít nhạy với mất gói.
 MSS = MAX_DATAGRAM
 INITIAL_CWND = 10 * MSS
 MIN_CWND = 2 * MSS
 
 
 class RateSample:
-    """Delivery-rate sample attached to every newly acknowledged packet.
+    """Mẫu tốc độ giao hàng gắn vào mỗi gói vừa được ACK.
 
     `rate` (byte/s) là tốc độ giao hàng đo được, `prior_delivered` dùng để đếm vòng (round) cho BBR,
     `app_limited` cho biết ứng dụng không còn dữ liệu để gửi (khi đó không nên tăng cwnd).
@@ -30,8 +28,7 @@ class RateSample:
 
 
 class CongestionControl:
-    """Giao diện chung. transport gọi: on_sent (gửi gói), on_ack (gói được ACK), on_congestion (phát hiện mất gói),
-    on_persistent_congestion (nhiều lần PTO liên tiếp) và pacing_rate (tốc độ phát tối đa, byte/s)."""
+    """Giao diện chung: transport gọi on_sent/on_ack/on_congestion/on_persistent_congestion và pacing_rate."""
     name = "base"
 
     def __init__(self):
@@ -47,7 +44,7 @@ class CongestionControl:
 
 # ------------------------------------------------------------------ CUBIC
 class Cubic(CongestionControl):
-    """W(t) = C (t-K)^3 + Wmax, multiplicative decrease by BETA, TCP-friendly region, fast convergence.
+    """CUBIC: W(t) = C·(t−K)³ + Wmax, giảm nhân theo BETA, có vùng thân thiện TCP, hội tụ nhanh.
 
     Cwnd tăng theo hàm bậc ba của thời gian kể từ lần mất gói gần nhất: đầu chu kỳ tăng nhanh để lấy lại
     băng thông cũ (Wmax), gần Wmax thì tăng chậm để thăm dò nhẹ nhàng. `w_est` là nhánh "Reno-friendly"
@@ -59,7 +56,7 @@ class Cubic(CongestionControl):
     def __init__(self):
         super().__init__()
         self.ssthresh = float("inf")
-        self.w_max = 0.0          # segments
+        self.w_max = 0.0          # đơn vị: segment (MSS)
         self.k = 0.0
         self.epoch = None
         self.w_est = 0.0
@@ -67,11 +64,11 @@ class Cubic(CongestionControl):
         self.state = "slow-start"
 
     def on_ack(self, now, size, sent_time, rtt, sample, inflight, srtt):
-        if sent_time <= self.recovery_start:       # still in the recovery period of the last loss
+        if sent_time <= self.recovery_start:       # vẫn trong giai đoạn phục hồi của lần mất gói trước
             return
         if sample is not None and sample.app_limited and inflight + size < self.cwnd * 0.5:
-            return                                   # do not grow cwnd when the sender is not using it
-        if self.cwnd < self.ssthresh:                # slow start
+            return                                   # không tăng cwnd khi ứng dụng không dùng hết
+        if self.cwnd < self.ssthresh:                # khởi động chậm
             self.cwnd += size
             self.state = "slow-start"
             return
@@ -86,7 +83,7 @@ class Cubic(CongestionControl):
             self.w_est = cw
         t = now - self.epoch + (srtt or 0.0)
         target = self.C * (t - self.k) ** 3 + self.w_max
-        self.w_est += 3 * (1 - self.BETA) / (1 + self.BETA) * (size / MSS) / cw   # Reno-friendly estimate
+        self.w_est += 3 * (1 - self.BETA) / (1 + self.BETA) * (size / MSS) / cw   # ước lượng thân thiện với Reno
         target = min(max(target, self.w_est), 1.5 * cw)
         if target > cw:
             inc = (target - cw) / cw * (size / MSS)
@@ -97,10 +94,10 @@ class Cubic(CongestionControl):
     def on_congestion(self, now, sent_time_of_lost):
         # Giảm cwnd nhân (x BETA) đúng một lần mỗi vòng RTT: nhiều gói mất cùng một đợt chỉ tính là một sự kiện.
         if sent_time_of_lost <= self.recovery_start:
-            return                                   # one reduction per round trip
+            return
         self.recovery_start = now
         cw = self.cwnd / MSS
-        self.w_max = cw * (1 + self.BETA) / 2 if cw < self.w_max else cw   # fast convergence
+        self.w_max = cw * (1 + self.BETA) / 2 if cw < self.w_max else cw   # hội tụ nhanh (fast convergence)
         self.cwnd = max(self.cwnd * self.BETA, MIN_CWND)
         self.ssthresh = self.cwnd
         self.epoch = None
@@ -122,14 +119,10 @@ class Cubic(CongestionControl):
 
 # ------------------------------------------------------------------ BBR
 class Bbr(CongestionControl):
-    """BBR v1: model the path with BtlBw (max filter) and RTprop (min filter).
+    """BBR v1: mô hình hoá đường truyền bằng BtlBw (lọc max) và RTprop (lọc min).
 
-    STARTUP -> DRAIN -> PROBE_BW (gain cycle) with periodic PROBE_RTT.
-    Loss is *not* used as a congestion signal (like BBRv1).
-
-    Ý tưởng: ước lượng băng thông nút cổ chai (BtlBw) và RTT nhỏ nhất (RTprop) rồi gửi đúng
-    BtlBw x RTprop byte "đang bay" — không coi mất gói là tín hiệu tắc nghẽn. Vì vậy BBR cần mẫu tốc độ
-    giao hàng chính xác; nếu mẫu bị đánh giá thấp, cwnd và pacing cùng nhỏ lại và thuật toán tự hạn chế.
+    Vòng đời: STARTUP -> DRAIN -> PROBE_BW (chu kỳ gain) kèm PROBE_RTT định kỳ; mất gói không phải
+    tín hiệu tắc nghẽn. Gửi đúng BtlBw x RTprop byte "đang bay", nên cần mẫu tốc độ giao hàng chính xác.
     """
     name = "bbr"
     HIGH_GAIN = 2.885
@@ -140,8 +133,8 @@ class Bbr(CongestionControl):
         super().__init__()
         self.state = "STARTUP"
         self.pacing_gain = self.cwnd_gain = self.HIGH_GAIN
-        # Bộ lọc max theo cửa sổ: deque đơn điệu giảm các (round, rate). Đầu deque luôn là max của cửa sổ,
-        # nên mỗi ACK tốn O(1) khấu hao thay vì quét lại toàn bộ mẫu (trước đây O(số mẫu) cho mỗi gói).
+        # Bộ lọc max theo cửa sổ: deque đơn điệu giảm (round, rate), đầu deque luôn là max của cửa sổ
+        # nên mỗi ACK tốn O(1) khấu hao thay vì quét lại toàn bộ mẫu.
         self.samples = deque()
         self.btl_bw = 0.0
         self.min_rtt = float("inf")
@@ -185,7 +178,7 @@ class Bbr(CongestionControl):
         if rtt is not None and (rtt <= self.min_rtt or expired):
             self.min_rtt, self.min_rtt_stamp = rtt, now
 
-        # --- state machine
+        # --- máy trạng thái
         if self.state == "STARTUP" and round_start and sample is not None and not sample.app_limited:
             if self.btl_bw >= self.full_bw * 1.25:
                 self.full_bw, self.full_cnt = self.btl_bw, 0
@@ -223,8 +216,8 @@ class Bbr(CongestionControl):
         self.cwnd = max(self.cwnd, 4 * MSS)
 
     def on_congestion(self, now, sent_time_of_lost):
-        # BBRv1 ignores loss in steady state. During STARTUP the 2.885x gain
-        # overshoots a 1-5% lossy path, so leave STARTUP on the first loss round.
+        # BBRv1 bỏ qua mất gói ở trạng thái ổn định. Trong STARTUP, gain 2.885 lần
+        # vượt quá đường truyền mất 1-5%, nên thoát STARTUP ngay vòng mất gói đầu tiên.
         if self.state == "STARTUP":
             self.full_pipe = True
             self.state, self.pacing_gain = "DRAIN", 1 / self.HIGH_GAIN

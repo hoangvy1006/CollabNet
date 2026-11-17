@@ -1,15 +1,13 @@
-"""Local HTTP gateway between the browser UI and ClientCore.
+"""Cổng HTTP cục bộ giữa UI trên trình duyệt và ClientCore.
 
-A tiny HTTP/1.1 server written directly on asyncio TCP streams (no web framework, no WebSocket):
-  * static files for the UI (pure client-side JavaScript)
-  * JSON API (fetch/XHR)            * Server-Sent Events for live updates (plain HTTP)
-  * streamed file upload with back-pressure into the UDP transport
+Một HTTP/1.1 server nhỏ viết trực tiếp trên asyncio TCP (không framework, không WebSocket):
+  * file tĩnh cho UI (JavaScript thuần phía client)
+  * API JSON (fetch/XHR)
+  * Server-Sent Events để cập nhật realtime (HTTP thường)
+  * upload file dạng stream, có back-pressure xuống transport UDP (không đọc cả file vào RAM)
 
-Tiếng Việt: cổng HTTP cục bộ cho trình duyệt. Tự viết trên asyncio TCP (không dùng framework): phục vụ file tĩnh,
-API JSON, SSE để đẩy sự kiện realtime và nhận upload dạng stream (không đọc cả file vào RAM).
-
-Security: bound to 127.0.0.1 by default, Host header check (DNS-rebinding), and a custom
-`X-Requested-With` header is required on every POST (blocks cross-site form posts).
+Bảo mật: mặc định chỉ bind 127.0.0.1, kiểm tra header Host (chống DNS-rebinding), và mọi POST phải có
+header riêng `X-Requested-With` (chặn form gửi từ trang web lạ).
 """
 import asyncio
 import json
@@ -29,7 +27,7 @@ STATIC = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "
 FONT_DIR = os.path.join(WEB_DIR, "fonts")
 FONTS = {f"/fonts/{n}" for n in os.listdir(FONT_DIR) if n.endswith(".woff2")} if os.path.isdir(FONT_DIR) else set()
 INLINE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
-                ".webp": "image/webp"}       # previewed inline in chat; everything else is a forced download
+                ".webp": "image/webp"}       # xem trước inline trong chat; mọi loại khác buộc tải về
 CSP = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; object-src 'none'; base-uri 'none'"
 MAX_UPLOAD = 2 * 1024 ** 3
 
@@ -47,6 +45,8 @@ REASONS = {200: "OK", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
 
 
 class Gateway:
+    """Nhận request HTTP của trình duyệt, chuyển thành lệnh cho ClientCore và đẩy sự kiện realtime qua SSE."""
+
     def __init__(self, core, host="127.0.0.1", port=8080, default_server="127.0.0.1:9000"):
         self.core, self.host, self.port, self.default_server = core, host, port, default_server
         self.server = None
@@ -62,7 +62,7 @@ class Gateway:
         if self.server:
             self.server.close()
 
-    # ------------------------------------------------------------ HTTP plumbing
+    # ------------------------------------------------------------ hạ tầng HTTP
     async def _handle(self, reader, writer):
         # Mỗi kết nối TCP phục vụ đúng một request (Connection: close). Kiểm tra Host (chống DNS rebinding) và
         # header X-Requested-With cho POST (trình duyệt không tự gắn header này trong form cross-site -> chống CSRF).
@@ -81,7 +81,7 @@ class Gateway:
             await self._send_json(writer, {"ok": False, "error": exc.msg}, exc.status)
         except (ConnectionError, asyncio.IncompleteReadError):
             pass
-        except Exception:                              # never crash the gateway
+        except Exception:                              # không bao giờ để gateway sập
             log.exception("unhandled error while serving request")   # chi tiết ở log, không trả ra trình duyệt
             try:
                 await self._send_json(writer, {"ok": False, "error": "internal error"}, 500)
@@ -94,7 +94,7 @@ class Gateway:
                 pass
 
     def _host_ok(self, header: str) -> bool:
-        """Reject DNS-rebinding: the Host must be this loopback gateway, not an attacker name."""
+        """Chặn DNS-rebinding: Host phải là chính gateway loopback này, không phải tên do kẻ tấn công đặt."""
         host = header.strip().lower()
         if host.startswith("["):
             end = host.find("]")
@@ -155,7 +155,7 @@ class Gateway:
         except ValueError:
             raise HttpError(400, "invalid JSON")
 
-    # ------------------------------------------------------------ routes
+    # ------------------------------------------------------------ định tuyến
     async def _route(self, method, url, headers, reader, writer):
         core, path = self.core, url.path
         if method == "GET" and path in STATIC:

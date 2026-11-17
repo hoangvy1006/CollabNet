@@ -1,4 +1,4 @@
-"""LAN discovery over UDP broadcast: servers announce themselves, clients listen."""
+"""Dò tìm server trong LAN bằng UDP broadcast: server tự quảng bá, client lắng nghe."""
 import asyncio
 import json
 import socket
@@ -7,10 +7,9 @@ from .protocol import DISCOVERY_PORT
 
 
 class Beacon:
-    """Server side: broadcast {"svc":"collabnet","port":..,"name":..} every few seconds.
+    """Phía server: vài giây một lần phát broadcast {"svc":"collabnet","port":..,"name":..}.
 
-    Server phát gói UDP broadcast định kỳ để client trong cùng LAN tìm thấy mà không cần biết trước địa chỉ IP.
-    Gửi thêm tới 127.0.0.1 để client chạy cùng máy cũng phát hiện được.
+    Client trong LAN tìm thấy server mà không cần biết trước IP. Gửi thêm tới 127.0.0.1 cho client cùng máy.
     """
 
     def __init__(self, loop, service_port: int, name: str, interval: float = 2.0):
@@ -35,7 +34,7 @@ class Beacon:
 
 
 async def discover(timeout: float = 2.5):
-    """Client side: listen for beacons; returns [{"host","port","name"}].
+    """Phía client: lắng nghe beacon; trả về [{"host","port","name"}].
 
     Dùng `loop.sock_recvfrom` thay cho `add_reader` để chạy được trên cả ProactorEventLoop (Windows mặc định,
     không hỗ trợ add_reader) lẫn SelectorEventLoop. Vòng lặp dừng khi hết `timeout` hoặc socket lỗi.

@@ -1,11 +1,7 @@
-"""Set of integers stored as sorted, disjoint, half-open intervals [start, end).
+"""Tập số nguyên lưu dưới dạng các khoảng nửa mở [start, end) đã sắp xếp, không chồng nhau.
 
-Used for (a) received packet numbers -> ACK ranges / duplicate detection and
-(b) acknowledged byte ranges of a send stream -> selective retransmission.
-
-Tiếng Việt: cấu trúc dữ liệu dùng chung cho hai việc nóng nhất của transport:
-  * tập packet number đã nhận -> sinh dải ACK và phát hiện gói trùng/replay;
-  * tập byte đã được ACK của một stream -> chỉ gửi lại đúng phần còn thiếu.
+Dùng cho (a) tập packet number đã nhận -> sinh dải ACK, phát hiện gói trùng/replay và
+(b) tập byte đã ACK của một stream -> chỉ gửi lại đúng phần còn thiếu.
 Mọi khoảng được gộp ngay khi thêm nên số khoảng luôn nhỏ, dù đã nhận hàng nghìn gói.
 """
 
@@ -18,7 +14,7 @@ class RangeSet:
     __slots__ = ("r",)
 
     def __init__(self):
-        self.r = []  # list[(start, end)] ascending
+        self.r = []  # danh sách [(start, end)] tăng dần
 
     def add(self, s: int, e: int) -> None:
         # Thêm [s, e) và gộp với mọi khoảng chồng lấn hoặc liền kề.
@@ -33,7 +29,7 @@ class RangeSet:
                     out.append((s, e))
                     placed = True
                 out.append((a, b))
-            else:  # overlapping or adjacent -> merge
+            else:  # chồng lấn hoặc liền kề -> gộp
                 s, e = min(s, a), max(e, b)
         if not placed:
             out.append((s, e))
@@ -44,7 +40,7 @@ class RangeSet:
         return any(a <= x < b for a, b in self.r)
 
     def missing(self, s: int, e: int):
-        """Sub-intervals of [s, e) that are NOT in the set.
+        """Các đoạn con của [s, e) KHÔNG có trong tập.
 
         Trả về các đoạn còn thiếu trong [s, e) — chính là các đoạn cần gửi lại hoặc chưa nhận được.
         """
@@ -64,7 +60,7 @@ class RangeSet:
         return res
 
     def contiguous_end(self, start: int) -> int:
-        """End of the interval containing `start` (or `start` if not covered).
+        """Điểm cuối của khoảng chứa `start` (hoặc chính `start` nếu không khoảng nào chứa).
 
         Dùng để biết đã nhận liền mạch tới đâu, từ đó mới giải phóng bộ đệm gửi (phần trước `start`).
         """
@@ -76,8 +72,10 @@ class RangeSet:
         return start
 
     def prune_oldest(self, max_ranges: int):
-        # Giới hạn bộ nhớ: bỏ các khoảng thấp nhất. Gói có số thứ tự dưới "floor" trả về coi như đã thấy (chống replay).
-        """Drop the lowest ranges beyond `max_ranges`; returns the new floor (0 if nothing dropped)."""
+        """Bỏ các khoảng thấp nhất vượt quá `max_ranges`; trả về mốc sàn mới (0 nếu không bỏ gì).
+
+        Gói có số thứ tự dưới mốc sàn được coi như đã thấy (chống replay), nên bộ nhớ không phình mãi.
+        """
         floor = 0
         while len(self.r) > max_ranges:
             floor = self.r.pop(0)[1]

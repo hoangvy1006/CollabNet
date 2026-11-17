@@ -1,10 +1,10 @@
-"""CollabNet client: network core + local HTTP gateway serving the browser UI.
+"""Client CollabNet: lõi mạng + cổng HTTP cục bộ phục vụ UI trên trình duyệt.
 
-Run:  python -m client.main --ui-port 8080
-Then open http://127.0.0.1:8080 in a browser.
+Chạy:  python -m client.main --ui-port 8080
+Rồi mở http://127.0.0.1:8080 trên trình duyệt.
 
-Tiếng Việt: điểm khởi chạy client. Mỗi tiến trình = một người dùng, có thư mục trạng thái riêng
-(`client_state_<ui-port>`) chứa file đã nhận và khoá server đã ghim.
+Mỗi tiến trình = một người dùng, có thư mục trạng thái riêng (`client_state_<ui-port>`) chứa file đã nhận,
+khoá server đã ghim và khoá P2P của client.
 """
 import argparse
 import asyncio
@@ -19,6 +19,7 @@ from client.gateway import Gateway
 
 
 async def amain(args):
+    """Khởi động ClientCore + Gateway rồi chạy cho tới khi tiến trình bị dừng (Ctrl+C)."""
     loop = asyncio.get_running_loop()
     state = args.state_dir or f"./client_state_{args.ui_port}"
     core = ClientCore(loop, state, args.cc, args.sim_loss, args.sim_delay_ms / 1000)
@@ -36,15 +37,16 @@ async def amain(args):
 
 
 def main():
+    """Phân tích tham số dòng lệnh, cấu hình log rồi chạy vòng lặp asyncio của client."""
     ap = argparse.ArgumentParser(description="CollabNet client")
     ap.add_argument("--ui-host", default="127.0.0.1")
     ap.add_argument("--ui-port", type=int, default=8080)
-    ap.add_argument("--server", default="127.0.0.1:9000", help="default host:port shown in the login form")
-    ap.add_argument("--state-dir", default=None, help="downloads + pinned server keys (default ./client_state_<port>)")
+    ap.add_argument("--server", default="127.0.0.1:9000", help="host:port mặc định hiện trong form đăng nhập")
+    ap.add_argument("--state-dir", default=None, help="thư mục file nhận + khoá server đã ghim (mặc định ./client_state_<cổng>)")
     ap.add_argument("--cc", choices=["cubic", "bbr"], default="cubic")
-    ap.add_argument("--open", action="store_true", help="open the browser automatically")
-    ap.add_argument("--sim-loss", type=float, default=0.0, help="simulated packet loss probability (testing)")
-    ap.add_argument("--sim-delay-ms", type=float, default=0.0, help="simulated one-way delay (testing)")
+    ap.add_argument("--open", action="store_true", help="tự mở trình duyệt")
+    ap.add_argument("--sim-loss", type=float, default=0.0, help="tỉ lệ mất gói mô phỏng (để kiểm thử)")
+    ap.add_argument("--sim-delay-ms", type=float, default=0.0, help="độ trễ một chiều mô phỏng, ms (để kiểm thử)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING,

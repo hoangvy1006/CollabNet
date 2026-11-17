@@ -1,4 +1,4 @@
-"""Benchmark: CUBIC vs BBR goodput for a 2 MB transfer, 20 ms RTT, several loss rates.
+"""Đo hiệu năng: goodput CUBIC vs BBR cho lượt truyền 2 MB, RTT 20 ms, nhiều mức mất gói.
 
 Chạy từ thư mục gốc dự án: ``python docs/benchmark.py``.
 Kết quả được ghi đè vào ``docs/benchmark.json`` (số liệu dùng cho báo cáo).
@@ -16,7 +16,7 @@ from tests.test_transport import Pair
 async def run(cc, loss, size=2_000_000):
     """Đo thời gian truyền `size` byte qua một cặp client/server có mất gói và trễ 20 ms.
 
-    Trả về dict gồm thời gian, goodput (Mbps) và số gói bị coi là mất do thuật toán điều khiển tắc nghẽn.
+    Trả về dict gồm thời gian, goodput (Mbps) và số gói mất mà transport ghi nhận.
     """
     p = await Pair(cc, loss, 0.01).start()
     try:

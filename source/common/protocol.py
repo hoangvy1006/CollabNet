@@ -1,12 +1,13 @@
-"""Application-layer protocol (runs *inside* transport streams).
+"""Giao thức tầng ứng dụng (chạy *bên trong* các stream của transport).
 
-Every application message is ``u32 length`` + UTF-8 JSON object with a mandatory ``"t"`` (type) field.
+Mỗi thông điệp ứng dụng là ``u32 độ dài`` + một object JSON UTF-8, bắt buộc có trường ``"t"`` (loại).
 
-Stream usage (the key to avoiding head-of-line blocking):
-    client stream 0   : control  (AUTH, LIST, BYE)                      long-lived
-    server stream 1   : control  (AUTH_OK/FAIL, PEERS, SENT, ERR)       long-lived
-    one new stream per chat message  : {"t":"MSG", ...}                 FIN after the message
-    one new stream per file transfer : {"t":"FILE",...} + raw bytes + {"t":"FILE_END","sha256":..}  FIN
+Cách dùng stream (chìa khoá để không bị head-of-line blocking):
+    stream 0 của client : điều khiển (AUTH, LIST, BYE)                          sống lâu
+    stream 1 của server : điều khiển (AUTH_OK/FAIL, PEERS, HISTORY, SENT, ERR)  sống lâu
+    mỗi tin nhắn mở một stream mới : {"t":"MSG", ...}                     FIN sau khi gửi xong tin
+    mỗi file mở một stream mới     : {"t":"FILE",...} + byte thô + {"t":"FILE_END","sha256":..}  FIN
+                                       (P2P: mở trên kết nối TRỰC TIẾP giữa hai client, không qua server)
 """
 import json
 import re
@@ -20,7 +21,7 @@ DISCOVERY_PORT = 9998
 
 
 class ProtocolError(Exception):
-    pass
+    """Dữ liệu vi phạm giao thức ứng dụng: bên nhận đóng kết nối với lỗi thay vì cố diễn giải."""
 
 
 def pack(obj: dict) -> bytes:
@@ -29,7 +30,7 @@ def pack(obj: dict) -> bytes:
 
 
 class MsgBuffer:
-    """Incremental decoder of length-prefixed JSON messages, with raw-byte take-over for file bodies.
+    """Bộ giải mã tăng dần cho thông điệp JSON có tiền tố độ dài, có thể "trưng dụng" byte thô cho thân file.
 
     Dữ liệu stream đến theo từng mảnh bất kỳ nên không đảm bảo trùng ranh giới thông điệp: `feed` gom byte,
     `pop` chỉ trả thông điệp khi đã đủ. Với file, sau thông điệp FILE phần thân là byte thô nên dùng `take`.

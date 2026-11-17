@@ -1,12 +1,12 @@
-"""Cryptographic primitives used by CollabNet.
+"""Các nguyên thuỷ mật mã dùng trong CollabNet.
 
-* X25519 ephemeral Diffie-Hellman  -> forward-secret shared secret
-* Ed25519 server identity          -> authenticates the server (anti man-in-the-middle)
-* HKDF-SHA256                      -> two directional AES-256 keys
-* AES-256-GCM                      -> authenticated encryption of every packet
-* PBKDF2-HMAC-SHA256               -> salted password hashes stored on the server
+* X25519 Diffie-Hellman tạm thời -> bí mật chung có forward secrecy
+* Ed25519 định danh server       -> xác thực server (chống kẻ đứng giữa - MITM)
+* HKDF-SHA256                    -> hai khoá AES-256 cho hai chiều
+* AES-256-GCM                    -> mã hoá có xác thực từng gói
+* PBKDF2-HMAC-SHA256             -> băm mật khẩu có muối lưu trên server
 
-Only the well-known `cryptography` package is used; no home-made crypto.
+Chỉ dùng thư viện chuẩn `cryptography`; không tự viết thuật toán mật mã.
 """
 import hashlib
 import hmac
@@ -24,24 +24,24 @@ _RAW = dict(encoding=serialization.Encoding.Raw, format=serialization.PublicForm
 PBKDF2_ITERATIONS = 120_000
 
 
-# ---------------------------------------------------------------- key agreement
+# ---------------------------------------------------------------- thoả thuận khoá
 def new_ephemeral():
-    """Return (private_key_object, 32-byte public key)."""
-    # Khoá tạm chỉ dùng cho MỘT phiên bắt tay (forward secrecy): bí mật chung X25519 không thể tái tạo nếu
-    # thiếu khoá riêng tạm này, nên sau này lộ khoá dài hạn cũng không giải mã ngược được lưu lượng cũ.
+    """Sinh khoá X25519 tạm thời: trả về (đối tượng khoá riêng, khoá công khai 32 byte)."""
+    # Khoá tạm chỉ dùng cho MỘT phiên bắt tay (forward secrecy): lộ khoá dài hạn sau này cũng không
+    # giải mã ngược được lưu lượng cũ.
     priv = X25519PrivateKey.generate()
     return priv, priv.public_key().public_bytes(**_RAW)
 
 
 def transcript(client_pub: bytes, server_pub: bytes, client_cid: int, server_cid: int) -> bytes:
-    """Data signed by the server so that the client knows the handshake is genuine."""
+    """Dữ liệu server ký để client biết lượt bắt tay này là thật, không bị giả mạo."""
     # Chữ ký bao gồm cả hai khoá công khai tạm thời và hai connection id: gắn chặt chữ ký vào đúng phiên
     # bắt tay này nên không thể bị phát lại (replay) sang một phiên khác.
     return b"collabnet-v1-handshake" + client_pub + server_pub + client_cid.to_bytes(4, "big") + server_cid.to_bytes(4, "big")
 
 
 def derive_keys(priv, peer_pub: bytes, client_pub: bytes, server_pub: bytes):
-    """ECDH + HKDF. Returns (key_client_to_server, key_server_to_client)."""
+    """ECDH + HKDF: trả về (khoá client→server, khoá server→client)."""
     # HKDF tách bí mật chung X25519 thành hai khoá AES-256 độc lập, mỗi chiều truyền một khoá riêng.
     shared = priv.exchange(X25519PublicKey.from_public_bytes(peer_pub))
     okm = HKDF(algorithm=hashes.SHA256(), length=64, salt=client_pub + server_pub,
@@ -50,11 +50,11 @@ def derive_keys(priv, peer_pub: bytes, client_pub: bytes, server_pub: bytes):
 
 
 class PacketCipher:
-    """AES-256-GCM. Nonce = 4 zero bytes || 8-byte packet number.
+    """AES-256-GCM. Nonce = 4 byte 0 || số thứ tự gói 8 byte.
 
-    Each direction has its own key and packet numbers are never reused
-    (retransmissions get a *new* packet number), so a nonce is never repeated.
-    The packet header is authenticated as additional data (AAD).
+    Mỗi chiều có khoá riêng và số thứ tự gói không bao giờ dùng lại
+    (gói gửi lại nhận số thứ tự mới), nên nonce không bao giờ trùng.
+    Header của gói được xác thực như additional data (AAD).
     """
 
     def __init__(self, key: bytes):
@@ -62,8 +62,7 @@ class PacketCipher:
 
     @staticmethod
     def _nonce(pn: int) -> bytes:
-        # 96-bit nonce: 32 zero bits || 64-bit packet number. Retransmits use a
-        # fresh packet number, so this nonce never repeats for a given key.
+        # Nonce 96 bit: 32 bit 0 || số thứ tự gói 64 bit.
         if not 0 <= pn < (1 << 64):
             raise ValueError("packet number does not fit the AES-GCM nonce")
         return b"\x00\x00\x00\x00" + pn.to_bytes(8, "big")
@@ -72,15 +71,14 @@ class PacketCipher:
         return self._aead.encrypt(self._nonce(pn), plaintext, aad)
 
     def open(self, pn: int, aad: bytes, ciphertext: bytes) -> bytes:
-        return self._aead.decrypt(self._nonce(pn), ciphertext, aad)  # raises InvalidTag
+        return self._aead.decrypt(self._nonce(pn), ciphertext, aad)  # sai khoá/sai AAD -> ném InvalidTag
 
 
-# ---------------------------------------------------------------- server identity
+# ---------------------------------------------------------------- định danh server
 def load_or_create_identity(path: str) -> Ed25519PrivateKey:
     """Nạp khoá định danh Ed25519 của server; chưa có thì sinh mới và lưu với quyền 0600.
 
-    Ghi nguyên tử (file tạm + rename): nếu server bị tắt đúng lúc đang ghi thì không để lại file khoá rỗng /
-    ghi dở khiến lần khởi động sau không đọc được khoá (và client phải xoá pin cũ).
+    Ghi nguyên tử: tắt server giữa lúc ghi cũng không để lại file khoá dở (client sẽ phải xoá pin cũ).
     """
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as fh:
@@ -117,7 +115,7 @@ def fingerprint(pub: bytes) -> str:
     return ":".join(h[i:i + 4] for i in range(0, len(h), 4))
 
 
-# ---------------------------------------------------------------- passwords
+# ---------------------------------------------------------------- mật khẩu
 def hash_password(password: str, salt: bytes | None = None, iterations: int = PBKDF2_ITERATIONS) -> str:
     # Định dạng lưu: "pbkdf2$<iterations>$<salt hex>$<hash hex>". Tham số iterations được ghi kèm để sau này
     # tăng độ khó vẫn xác thực được các mật khẩu cũ (verify_password đọc đúng số vòng đã dùng).

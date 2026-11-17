@@ -1,13 +1,15 @@
-"""CollabNet server: authentication, presence tracking, message routing, cut-through file relay.
+"""Server CollabNet: xác thực, theo dõi presence, định tuyến tin nhắn, lưu lịch sử chat.
 
-Run:  python -m server.server --port 9000
+Chạy:  python -m server.server --port 9000
 
-Tiếng Việt: server làm 4 việc chính trên một socket UDP duy nhất (asyncio, không thread):
+server làm 4 việc chính trên một socket UDP duy nhất (asyncio, không thread):
   1. Xác thực (AUTH) và đăng ký tài khoản mới ở lần đăng nhập đầu; mật khẩu lưu dạng PBKDF2 có muối.
-  2. Theo dõi presence: ai đang online, IP/port nào, và phát danh sách PEERS khi có thay đổi.
+  2. Theo dõi presence: ai đang online, IP/port và cổng + khoá P2P nào, phát danh sách PEERS khi có thay đổi.
   3. Định tuyến tin nhắn (broadcast "*" hoặc riêng tư), mỗi tin một stream nên không bị chặn bởi file lớn.
-  4. Relay file kiểu cut-through: byte nhận từ người gửi được chuyển ngay cho người nhận, có back-pressure
-     (giữ lại flow-control credit khi bên nhận chậm) nên server không phải lưu cả file trong RAM.
+  4. Lưu lịch sử hội thoại (history.json) và gửi lại cho client ngay sau khi đăng nhập: đăng xuất / tắt máy
+     rồi vào lại vẫn còn các đoạn chat cũ.
+Chuyển file KHÔNG đi qua server: server chỉ giới thiệu địa chỉ + khoá của từng peer, còn hai client kết nối
+TRỰC TIẾP với nhau (P2P) bằng chính transport này.
 """
 import argparse
 import asyncio
@@ -19,17 +21,17 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common import crypto
 from common.discovery import Beacon
-from common.protocol import MAX_TEXT, USERNAME_RE, MsgBuffer, ProtocolError, pack, safe_filename
+from common.protocol import MAX_TEXT, USERNAME_RE, MsgBuffer, ProtocolError, pack
 from common.transport import Endpoint
+from server.history import HistoryStore
 from server.users import UserStore
 
 log = logging.getLogger("collabnet.server")
-RELAY_HIGH = 384 * 1024          # relay back-pressure threshold (bytes buffered towards the receiver)
 # Quy ước stream (xem common/protocol.py): client mở stream chẵn (0 = control), server mở stream lẻ (1 = control).
 
 
-# `UserStore` được tách sang server/users.py; re-export để `from server.server import UserStore` vẫn chạy.
-__all__ = ["Server", "Session", "StreamState", "Relay", "UserStore", "amain", "main"]
+# `UserStore` nằm ở server/users.py; xuất lại ở đây để `from server.server import UserStore` vẫn chạy.
+__all__ = ["Server", "Session", "StreamState", "UserStore", "amain", "main"]
 
 
 class Session:
@@ -38,27 +40,18 @@ class Session:
     def __init__(self, conn):
         self.conn, self.user, self.since = conn, None, time.time()
         self.addr = conn.peer_addr                # địa chỉ lúc chấp nhận (dùng cho log)
+        self.p2p_port, self.p2p_fp = 0, ""        # nơi client khác kết nối trực tiếp (file P2P)
         self.ctrl = MsgBuffer()
         self.streams = {}
         self.auth_task = None                     # task xác thực đang chạy (chỉ cho phép một task mỗi kết nối)
-        self.ctrl_sid = conn.open_stream(0)      # server->client control stream (id 1)
+        self.ctrl_sid = conn.open_stream(0)      # stream điều khiển server->client (id 1)
 
 
 class StreamState:
-    """Trạng thái một stream đang nhận từ client: loại (msg/file), buffer phân tích header, thông tin relay."""
+    """Trạng thái một stream đang nhận từ client: loại (msg/discard) và buffer phân tích header."""
 
     def __init__(self):
-        self.kind, self.buf, self.relay = None, MsgBuffer(), None
-
-
-class Relay:
-    """Một lượt chuyển file đang diễn ra: đích, stream phía đích, kích thước khai báo, số byte đã thấy,
-    và lượng flow-control credit đang giữ lại (`held`) khi người nhận chưa kịp tiêu thụ."""
-
-    def __init__(self, dest, dsid, size, fid):
-        self.dest, self.dsid, self.size, self.fid, self.seen = dest, dsid, size, fid, 0
-        self.held = 0
-        self.holding = False
+        self.kind, self.buf = None, MsgBuffer()
 
 
 class Server:
@@ -69,6 +62,7 @@ class Server:
         os.makedirs(data_dir, exist_ok=True)
         self.loop, self.max_file = loop, max_file_mb * 1024 * 1024
         self.store = UserStore(os.path.join(data_dir, "users.json"))
+        self.history = HistoryStore(os.path.join(data_dir, "history.json"), loop)
         identity = crypto.load_or_create_identity(os.path.join(data_dir, "server_identity.key"))
         self.fingerprint = crypto.fingerprint(crypto.public_bytes(identity))
         self.ep = Endpoint(loop, (host, port), identity=identity, cc=cc, sim_loss=sim_loss, sim_delay=sim_delay)
@@ -81,6 +75,7 @@ class Server:
     def close(self):
         if self.beacon:
             self.beacon.close()
+        self.history.close()
         self.ep.close()
 
     # ------------------------------------------------------------ sessions
@@ -100,7 +95,9 @@ class Server:
 
     def _peers(self):
         # Dùng địa chỉ hiện tại của kết nối (có thể đã đổi nếu client chuyển mạng / NAT rebinding)
-        return [{"user": u, "ip": s.conn.peer_addr[0], "port": s.conn.peer_addr[1], "since": s.since}
+        # Kèm cổng + fingerprint P2P để hai client kết nối trực tiếp với nhau (server không thấy nội dung file).
+        return [{"user": u, "ip": s.conn.peer_addr[0], "port": s.conn.peer_addr[1], "since": s.since,
+                 "p2p_port": s.p2p_port, "p2p_fp": s.p2p_fp}
                 for u, s in self.by_user.items()]
 
     def _send_ctrl(self, s, obj):
@@ -124,7 +121,7 @@ class Server:
         dest.conn.send(sid, pack(obj), fin=True)
         return True
 
-    # ------------------------------------------------------------ data entry point
+    # ------------------------------------------------------------ điểm vào dữ liệu
     def _on_data(self, s, sid, data, fin):
         # Điểm vào cho mọi dữ liệu stream: stream 0 là control; stream khác chỉ được dùng sau khi xác thực.
         # ProtocolError (client vi phạm giao thức) -> đóng kết nối; lỗi bất ngờ khác -> log + đóng, không làm sập server.
@@ -184,23 +181,39 @@ class Server:
         old = self.by_user.get(user)
         if old is not None:
             old.conn.close(7, "logged in from another place")
+        try:
+            p2p_port = int(m.get("p2p_port") or 0)
+        except (TypeError, ValueError):
+            p2p_port = 0
+        fp = str(m.get("p2p_fp") or "")
         s.user = user
+        s.p2p_port = p2p_port if 0 < p2p_port < 65536 else 0
+        s.p2p_fp = fp if self._valid_fp(fp) else ""
         self.by_user[user] = s
         log.info("user %s logged in from %s:%d (%s)", user, *s.addr, why)
         self._send_ctrl(s, {"t": "AUTH_OK", "user": user, "peers": self._peers(), "msg": why,
                             "max_file": self.max_file})
+        # Trả lại các đoạn chat cũ ngay sau khi xác thực: client vừa đăng nhập lại (kể cả sau khi tắt máy)
+        # dựng lại được hội thoại mà không cần giữ gì trong RAM từ phiên trước. Tin CHUNG cũ hơn thời điểm
+        # tài khoản được tạo không được trả lại (tài khoản mới không thấy hội thoại trước khi nó tồn tại).
+        since = self.store.first_seen_of(user)
+        self._send_ctrl(s, {"t": "HISTORY", "items": self.history.for_user(user, since)})
         self._broadcast_peers()
 
-    # ------------------------------------------------------------ message / file streams
+    @staticmethod
+    def _valid_fp(fp: str) -> bool:
+        """Fingerprint Ed25519 dạng "abcd:ef01:..." (32 ký tự hex + 7 dấu ':') do client công bố."""
+        return len(fp) == 39 and all(c in "0123456789abcdef:" for c in fp)
+
+    # ------------------------------------------------------------ các stream tin nhắn
     def _on_stream(self, s, sid, data, fin):
-        # Stream tin nhắn/file: thông điệp đầu tiên (MSG hoặc FILE) quyết định loại stream. Với FILE, phần byte
-        # còn lại đi thẳng qua `_relay`. Trả về False để giữ flow-control credit (back-pressure), None để tự cấp.
+        # Stream tin nhắn: thông điệp đầu tiên phải là MSG. File KHÔNG đi qua server (P2P), nên nếu client cũ
+        # còn gửi FILE thì server báo lỗi và bỏ phần thân — không chuyển tiếp một byte nào.
         st = s.streams.get(sid)
         if st is None:
             if len(s.streams) > 64:
                 raise ProtocolError("too many open streams")
             st = s.streams[sid] = StreamState()
-        hold = False
         if st.kind is None:
             st.buf.feed(data)
             hdr = st.buf.pop()
@@ -212,18 +225,15 @@ class Server:
                 st.kind = "msg"
                 self._route_msg(s, hdr)
             elif hdr["t"] == "FILE":
-                st.kind = "file"
-                self._start_file(s, st, hdr)
-                rest = st.buf.take_all()
-                if rest or fin:
-                    hold = self._relay(s, st, sid, rest, fin, len(data))
+                st.kind = "discard"
+                self._send_ctrl(s, {"t": "ERR", "ref": str(hdr.get("id", ""))[:64],
+                                    "msg": "file transfer must be peer-to-peer"})
             else:
                 raise ProtocolError(f"unexpected stream message {hdr['t']}")
-        elif st.kind == "file":
-            hold = self._relay(s, st, sid, data, fin, len(data))
+        if st.kind == "discard":
+            st.buf.take_all()                     # bỏ phần thân file khỏi RAM
         if fin:
             s.streams.pop(sid, None)
-        return False if hold else None
 
     def _route_msg(self, s, hdr):
         # Văn bản bị cắt ở MAX_TEXT; id do client đặt (<=64 ký tự) chỉ dùng để client đối chiếu SENT/ERR.
@@ -245,62 +255,13 @@ class Server:
         if delivered == 0 and to != "*":              # người nhận vừa rớt mạng: báo lỗi chứ không báo "đã gửi"
             self._send_ctrl(s, {"t": "ERR", "ref": mid, "msg": f"user '{to}' is not online"})
             return
+        if mid:                                       # giữ lại cho lần đăng nhập sau (lịch sử chat)
+            self.history.add({"id": mid, "from": s.user, "to": to, "text": out["text"], "ts": out["ts"]})
         self._send_ctrl(s, {"t": "SENT", "ref": mid, "ts": out["ts"], "n": delivered})
-
-    def _start_file(self, s, st, hdr):
-        fid, to = str(hdr.get("id", ""))[:64], str(hdr.get("to", ""))[:64]
-        try:
-            size = int(hdr.get("size", -1))
-        except (TypeError, ValueError):
-            size = -1
-        dest = self.by_user.get(to)
-        err = None
-        if size < 0 or size > self.max_file:
-            err = f"invalid or too large file (limit {self.max_file // 2**20} MB)"
-        elif dest is None or dest.conn.closed or to == s.user:
-            err = f"user '{to}' is not online"
-        if err:
-            self._send_ctrl(s, {"t": "ERR", "ref": fid, "msg": err})
-            return                                    # st.relay stays None: body is discarded
-        dsid = dest.conn.open_stream(1)               # lower priority than chat
-        dest.conn.send(dsid, pack({"t": "FILE", "id": fid, "from": s.user, "name": safe_filename(hdr.get("name")),
-                                   "size": size, "ts": time.time()}))
-        st.relay = Relay(dest, dsid, size, fid)
-        log.info("file relay %s -> %s: %s (%d bytes)", s.user, to, hdr.get("name"), size)
-
-    def _relay(self, s, st, sid, data, fin, credit_len):
-        """Cut-through relay with back-pressure. Returns True if flow-control credit must be held."""
-        r = st.relay
-        if r is None or r.dest.conn.closed:
-            return False
-        r.seen += len(data)
-        if r.seen > r.size + 4096:
-            self._send_ctrl(s, {"t": "ERR", "ref": r.fid, "msg": "file body larger than announced"})
-            st.relay = None
-            return False
-        dc = r.dest.conn
-        dc.send(r.dsid, data, fin)
-        # Hold flow-control credit only while the receiver side is above the
-        # relay watermark. Release as soon as it drops back under that mark,
-        # not when the whole congestion window has drained to 64 KB.
-        if not data or dc.buffered(r.dsid) < RELAY_HIGH:
-            return False
-        r.held += credit_len
-        if not r.holding:
-            r.holding = True
-            src = s.conn
-
-            def resume(src=src, sid=sid, relay=r):
-                relay.holding = False
-                n, relay.held = relay.held, 0
-                if n and not src.closed:
-                    src.consume(sid, n)
-
-            dc.set_drain_callback(r.dsid, resume, below=RELAY_HIGH)
-        return True
 
 
 async def amain(args):
+    """Dựng Server rồi chạy cho tới khi tiến trình bị dừng (Ctrl+C)."""
     loop = asyncio.get_running_loop()
     srv = Server(loop, args.host, args.port, args.data_dir, args.cc, args.sim_loss, args.sim_delay_ms / 1000,
                  args.max_file_mb, not args.no_beacon)
@@ -313,20 +274,21 @@ async def amain(args):
 
 
 def main():
+    """Phân tích tham số dòng lệnh, cấu hình log rồi chạy vòng lặp asyncio của server."""
     ap = argparse.ArgumentParser(description="CollabNet server")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--data-dir", default="./server_data")
     ap.add_argument("--cc", choices=["cubic", "bbr"], default="cubic")
     ap.add_argument("--max-file-mb", type=int, default=512)
-    ap.add_argument("--no-beacon", action="store_true", help="disable LAN discovery broadcast")
-    ap.add_argument("--sim-loss", type=float, default=0.0, help="simulated packet loss probability (testing)")
-    ap.add_argument("--sim-delay-ms", type=float, default=0.0, help="simulated one-way delay (testing)")
+    ap.add_argument("--no-beacon", action="store_true", help="tắt quảng bá tìm server trong LAN")
+    ap.add_argument("--sim-loss", type=float, default=0.0, help="tỉ lệ mất gói mô phỏng (để kiểm thử)")
+    ap.add_argument("--sim-delay-ms", type=float, default=0.0, help="độ trễ một chiều mô phỏng, ms (để kiểm thử)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    loop = asyncio.SelectorEventLoop()               # selector loop works with add_reader on Windows too
+    loop = asyncio.SelectorEventLoop()               # SelectorEventLoop cũng dùng được add_reader trên Windows
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(amain(args))

@@ -1,6 +1,8 @@
-"""Client core: network logic + application protocol. No UI code here (see gateway.py / web/).
-lớp ClientCore giữ kết nối tới server, tự kết nối lại khi mất mạng, lưu lịch sử tin nhắn/tệp trong
-bộ nhớ và phát sự kiện (emit) cho UI. Nhận file ghi vào `*.part` rồi đổi tên sau khi kiểm tra SHA-256.
+"""Lõi client: logic mạng + giao thức ứng dụng. Không có mã UI ở đây (xem gateway.py / web/).
+
+Lớp ClientCore giữ kết nối tới server, tự kết nối lại khi mất mạng, lưu lịch sử tin nhắn/tệp trong bộ nhớ
+và phát sự kiện (emit) cho UI. File nhận được ghi vào `*.part` rồi đổi tên sau khi kiểm tra SHA-256;
+file gửi đi theo P2P trực tiếp sang client của người nhận, không qua server.
 """
 import asyncio
 import hashlib
@@ -13,7 +15,7 @@ import uuid
 
 from common import crypto
 from common.fsutil import atomic_write_json
-from common.protocol import MsgBuffer, ProtocolError, pack, safe_filename
+from common.protocol import MAX_TEXT, MsgBuffer, ProtocolError, pack, safe_filename
 from common.transport import Endpoint
 
 log = logging.getLogger("collabnet.client")
@@ -40,9 +42,17 @@ class ClientCore:
         self.user = None
         self.creds = None
         self.peers, self.history, self.files = [], [], []
-        self._midx: dict[str, dict] = {}        # message id -> history item (delivery status)
-        self._fidx: dict[str, dict] = {}        # file id -> file item (progress / status)
-        self.max_file = None                    # server's file-size limit (bytes), learnt at login
+        # --- P2P: mỗi client vừa là người nhận kết nối trực tiếp từ client khác (file không đi qua server)
+        self._p2p_ep = None                      # Endpoint UDP nhận kết nối P2P
+        self.p2p_fp = ""                         # fingerprint khoá Ed25519 của client này (công bố qua server)
+        self._p2p_conns: dict[str, tuple] = {}   # user -> (Connection, fingerprint đã xác minh)
+        self._p2p_rx: dict[object, dict] = {}    # Connection P2P -> {sid: trạng thái stream đang nhận}
+        self._p2p_lock = asyncio.Lock()          # mỗi Endpoint chỉ bắt tay được một kết nối tại một thời điểm
+        self._ctrl_sid = None                    # stream điều khiển client -> server (0)
+        self._pending_history = None             # HISTORY đến trước khi biết `user` (xử lý sau khi đăng nhập xong)
+        self._midx: dict[str, dict] = {}        # id tin nhắn -> mục lịch sử (trạng thái gửi)
+        self._fidx: dict[str, dict] = {}        # id file -> mục file (tiến độ / trạng thái)
+        self.max_file = None                    # giới hạn dung lượng file của server (byte), biết khi đăng nhập
         self.subscribers: set[asyncio.Queue] = set()
         self.rx: dict[int, dict] = {}
         self.aborted: set[str] = set()
@@ -53,7 +63,7 @@ class ClientCore:
         self._reconnect_task = self._stats_task = None
         self.status = "offline"
 
-    # ------------------------------------------------------------ events
+    # ------------------------------------------------------------ sự kiện
     def subscribe(self):
         q = asyncio.Queue(maxsize=2000)
         self.subscribers.add(q)
@@ -70,30 +80,29 @@ class ClientCore:
                 pass
 
     def snapshot(self):
-        # Ảnh chụp để UI dựng lại toàn bộ màn hình sau khi tải lại trang; chỉ gửi phần đuôi lịch sử để
-        # payload không tăng vô hạn theo thời gian sử dụng.
+        # Ảnh chụp để UI dựng lại màn hình sau khi tải lại trang; chỉ gửi phần đuôi lịch sử để payload không phình.
         return {"status": self.status, "user": self.user, "peers": self.peers, "history": self.history[-300:],
                 "files": self.files[-100:], "stats": self.conn.stats() if self.conn else None, "cc": self.cc,
                 "max_file": self.max_file}
 
     def _remember(self, item, index, store):
-        """Keep bounded in-memory history (messages / file transfers) so the UI can rebuild after a reload."""
+        """Giữ lịch sử trong RAM có giới hạn (tin nhắn / lượt truyền file) để UI dựng lại sau khi tải lại trang."""
         store.append(item)
         index[item["id"]] = item
         if len(store) > 2000:
             old = store.pop(0)
             index.pop(old["id"], None)
 
-    # ------------------------------------------------------------ connection management
+    # ------------------------------------------------------------ quản lý kết nối
     def _verify_server(self, host, port):
-        # TOFU (trust on first use): lần đầu ghi nhớ fingerprint khoá server; lần sau khác -> từ chối (chống MITM).
+        # TOFU: lần đầu ghim fingerprint khoá server; lần sau khác -> từ chối (chống MITM).
         def check(pub: bytes):
             fp, key = crypto.fingerprint(pub), f"{host}:{port}"
             known = {}
             if os.path.exists(self.known_hosts):
                 with open(self.known_hosts, encoding="utf-8") as fh:
                     known = json.load(fh)
-            if key not in known:                                  # trust on first use (TOFU)
+            if key not in known:                                  # tin ở lần gặp đầu tiên (TOFU)
                 known[key] = fp
                 atomic_write_json(self.known_hosts, known)        # ghi nguyên tử: không hỏng file pin khi crash
                 self.emit("notice", level="info", text=f"New server pinned: {fp}")
@@ -104,6 +113,8 @@ class ClientCore:
 
     async def login(self, host, port, user, password):
         await self._disconnect(announce=False)
+        # Lấy lịch sử từ server, tránh lẫn hội thoại của người dùng trước đó trên cùng tiến trình.
+        self._clear_chat()
         self.creds = (host, int(port), user, password)
         await self._connect()
         self._want_online = True
@@ -127,8 +138,11 @@ class ClientCore:
         conn.on_close = self._on_conn_close
         self._ctrl, self.rx = MsgBuffer(), {}
         self._auth_fut = self.loop.create_future()
-        sid = conn.open_stream(0)
-        conn.send(sid, pack({"t": "AUTH", "user": user, "pass": password}))
+        sid = self._ctrl_sid = conn.open_stream(0)
+        # Công bố cổng + khoá P2P: client khác dùng thông tin này để kết nối trực tiếp (server chỉ chuyển tiếp).
+        p2p_port = self._p2p_endpoint().addr[1]
+        conn.send(sid, pack({"t": "AUTH", "user": user, "pass": password,
+                             "p2p_port": p2p_port, "p2p_fp": self.p2p_fp}))
         try:
             res = await asyncio.wait_for(self._auth_fut, 8)
         except BaseException:
@@ -138,6 +152,9 @@ class ClientCore:
             raise
         self.user, self.peers, self.status = res["user"], res["peers"], "online"
         self.max_file = res.get("max_file")
+        if self._pending_history is not None:     # HISTORY có thể tới ngay sau AUTH_OK, trước khi biết tên mình
+            items, self._pending_history = self._pending_history, None
+            self._restore_history(items)
         self.emit("status", status=self.status, user=self.user)
         self.emit("peers", peers=self.peers)
         self._stats_on = True
@@ -185,12 +202,25 @@ class ClientCore:
         if self.ep:
             self.ep.close()
         self.ep = self.conn = None
+        self._ctrl_sid = None
+        self._drop_p2p_conns()
         self.user, self.peers, self.status = None, [], "offline"
         if announce:
             self.emit("status", status="offline")
 
     async def logout(self):
         await self._disconnect()
+        self._close_p2p()
+        self._clear_chat()                        # lần đăng nhập sau sẽ nhận lại lịch sử từ server
+
+    def _clear_chat(self):
+        """Xoá hội thoại trong RAM (server mới là nơi lưu lịch sử lâu dài)."""
+        self.history.clear()
+        self.files.clear()
+        self._midx.clear()
+        self._fidx.clear()
+        self.aborted.clear()
+        self._pending_history = None
 
     def _on_conn_close(self, conn, reason):
         if conn is not self.conn:
@@ -248,7 +278,100 @@ class ClientCore:
             if self._stats_task is asyncio.current_task():
                 self._stats_task = None
 
-    # ------------------------------------------------------------ receiving
+    # ------------------------------------------------------------ peer-to-peer
+    def _p2p_endpoint(self):
+        """Endpoint nhận kết nối trực tiếp từ client khác. Khoá Ed25519 riêng được công bố qua server để
+        người gửi xác minh đúng máy nhận (không thể giả mạo peer khác)."""
+        if self._p2p_ep is None:
+            identity = crypto.load_or_create_identity(os.path.join(self.state_dir, "client_identity.key"))
+            ep = Endpoint(self.loop, ("0.0.0.0", 0), identity=identity, cc=self.cc,
+                          sim_loss=self.sim_loss, sim_delay=self.sim_delay)
+            ep.on_accept = self._on_p2p_accept
+            self._p2p_ep, self.p2p_fp = ep, crypto.fingerprint(crypto.public_bytes(identity))
+        return self._p2p_ep
+
+    def _on_p2p_accept(self, conn):
+        rx = self._p2p_rx[conn] = {}
+        conn.on_stream_data = lambda c, sid, data, fin: self._on_p2p_data(c, rx, sid, data, fin)
+        conn.on_close = lambda c, reason: self._p2p_rx.pop(c, None)
+
+    def _on_p2p_data(self, conn, rx, sid, data, fin):
+        # Chỉ file đi trên kết nối P2P; dùng chung logic ghép file với luồng nhận từ server.
+        try:
+            self._on_stream(rx, sid, data, fin)
+        except ProtocolError as exc:
+            log.warning("protocol error on peer connection: %s", exc)
+            conn.close(5, str(exc))
+
+    def _drop_p2p_conns(self):
+        for conn, _fp in list(self._p2p_conns.values()):
+            try:
+                conn.close(0, "peer session ended")
+            except Exception:
+                pass
+        self._p2p_conns.clear()
+
+    def _close_p2p(self):
+        self._drop_p2p_conns()
+        self._p2p_rx.clear()
+        if self._p2p_ep is not None:
+            self._p2p_ep.close()
+            self._p2p_ep = None
+
+    def _sync_p2p_cache(self):
+        """Bỏ kết nối P2P cũ: người đó offline, hoặc khoá của họ đã đổi (đăng nhập lại / máy khác)."""
+        live = {p.get("user"): p.get("p2p_fp", "") for p in self.peers}
+        for user, (conn, fp) in list(self._p2p_conns.items()):
+            if conn.closed or live.get(user) != fp:
+                try:
+                    conn.close(0, "peer session changed")
+                except Exception:
+                    pass
+                self._p2p_conns.pop(user, None)
+
+    async def _refresh_peers(self, user, timeout=2.0):
+        """Xin danh sách peer mới nhất khi thông tin P2P của `user` chưa đến (PEERS đang trên đường)."""
+        deadline = self.loop.time() + timeout
+        while self.status == "online" and self.loop.time() < deadline:
+            if any(p.get("user") == user and p.get("p2p_port") for p in self.peers):
+                return
+            if self.conn and not self.conn.closed and self._ctrl_sid is not None:
+                self.conn.send(self._ctrl_sid, pack({"t": "LIST"}))
+            await asyncio.sleep(0.1)
+
+    async def _p2p_connect(self, user):
+        """Kết nối TRỰC TIẾP tới client của `user`; khoá phải khớp fingerprint server đã công bố."""
+        peer = next((p for p in self.peers if p.get("user") == user), None)
+        if peer is None or not peer.get("p2p_port") or not peer.get("p2p_fp"):
+            await self._refresh_peers(user)
+            peer = next((p for p in self.peers if p.get("user") == user), None)
+        if peer is None:
+            raise ConnectionError(f"user '{user}' is not online")
+        try:
+            port = int(peer.get("p2p_port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        fp = str(peer.get("p2p_fp") or "")
+        if not 0 < port < 65536 or not fp:
+            raise ConnectionError(f"user '{user}' does not accept peer-to-peer transfers")
+        cached = self._p2p_conns.get(user)
+        if cached is not None and not cached[0].closed and cached[1] == fp:
+            return cached[0]
+        ep, addr = self._p2p_endpoint(), (peer.get("ip") or "127.0.0.1", port)
+
+        def verify(pub: bytes):
+            if crypto.fingerprint(pub) != fp:
+                raise ConnectionError(f"peer key mismatch for '{user}' (possible man-in-the-middle)")
+
+        async with self._p2p_lock:
+            cached = self._p2p_conns.get(user)
+            if cached is not None and not cached[0].closed and cached[1] == fp:
+                return cached[0]
+            conn = await ep.connect(addr, verify=verify)
+        self._p2p_conns[user] = (conn, fp)
+        return conn
+
+    # ------------------------------------------------------------ nhận
     def _on_data(self, conn, sid, data, fin):
         try:
             if sid == 1:
@@ -256,30 +379,33 @@ class ClientCore:
                 while (m := self._ctrl.pop()) is not None:
                     self._on_ctrl(m)
                 return
-            st = self.rx.get(sid)
-            if st is None:
-                st = self.rx[sid] = {"kind": None, "buf": MsgBuffer()}
-            if st["kind"] is None:
-                st["buf"].feed(data)
-                hdr = st["buf"].pop()
-                if hdr is None:
-                    return
-                if hdr["t"] == "MSG":
-                    st["kind"] = "msg"
-                    self._on_msg(hdr)
-                elif hdr["t"] == "FILE":
-                    self._file_start(st, hdr)
-                    self._file_data(st, fin)
-                else:
-                    raise ProtocolError("unexpected message")
-            elif st["kind"] == "file":
-                st["buf"].feed(data)
-                self._file_data(st, fin)
-            if fin:
-                self.rx.pop(sid, None)
+            self._on_stream(self.rx, sid, data, fin)
         except ProtocolError as exc:
             log.warning("protocol error: %s", exc)
             conn.close(5, str(exc))
+
+    def _on_stream(self, rx, sid, data, fin):
+        st = rx.get(sid)
+        if st is None:
+            st = rx[sid] = {"kind": None, "buf": MsgBuffer()}
+        if st["kind"] is None:
+            st["buf"].feed(data)
+            hdr = st["buf"].pop()
+            if hdr is None:
+                return
+            if hdr["t"] == "MSG":
+                st["kind"] = "msg"
+                self._on_msg(hdr)
+            elif hdr["t"] == "FILE":
+                self._file_start(st, hdr)
+                self._file_data(st, fin)
+            else:
+                raise ProtocolError("unexpected message")
+        elif st["kind"] == "file":
+            st["buf"].feed(data)
+            self._file_data(st, fin)
+        if fin:
+            rx.pop(sid, None)
 
     def _on_ctrl(self, m):
         t = m["t"]
@@ -289,11 +415,18 @@ class ClientCore:
             self._auth_fut.set_exception(AuthRejected(m.get("msg", "authentication failed")))
         elif t == "PEERS":
             self.peers = m["peers"]
+            self._sync_p2p_cache()
             self.emit("peers", peers=self.peers)
+        elif t == "HISTORY":
+            items = m.get("items") or []
+            if self.user is None:
+                self._pending_history = (self._pending_history or []) + items
+            else:
+                self._restore_history(items)
         elif t == "SENT":
             item = self._midx.get(m.get("ref"))
             if item:
-                item.update(status="sent", n=m.get("n"), ts=m.get("ts", item["ts"]))   # server clock = common ordering
+                item.update(status="sent", n=m.get("n"), ts=m.get("ts", item["ts"]))   # giờ server làm chuẩn sắp xếp chung
             self.emit("sent", ref=m.get("ref"), n=m.get("n"), ts=m.get("ts"))
         elif t == "ERR":
             ref, text = m.get("ref", ""), m.get("msg", "error")
@@ -302,7 +435,7 @@ class ClientCore:
             self.emit("error", ref=ref, text=text)
 
     def _fail(self, ref, text):
-        """Mark a message or a file transfer as failed (state survives a UI reload)."""
+        """Đánh dấu tin nhắn hoặc lượt truyền file là thất bại (trạng thái còn sau khi tải lại UI)."""
         item = self._midx.get(ref) or self._fidx.get(ref)
         if item and item.get("status") != "done":
             item.update(status="failed", error=text)
@@ -312,6 +445,31 @@ class ClientCore:
                 "ts": m.get("ts", time.time()), "mine": False, "status": "sent"}
         self._remember(item, self._midx, self.history)
         self.emit("msg", **item)
+
+    def _restore_history(self, items):
+        """Nạp lại lịch sử server gửi sau khi đăng nhập (đăng xuất / tắt máy không còn mất hội thoại)."""
+        restored = []
+        for rec in items:
+            if not isinstance(rec, dict):
+                continue
+            mid, frm, to = rec.get("id"), rec.get("from"), rec.get("to")
+            if not mid or not frm or not to:
+                continue
+            old = self._midx.get(mid)
+            if old is not None:                       # tin đã có trong RAM (tự kết nối lại): chỉ đồng bộ giờ
+                old.update(status="sent", ts=rec.get("ts", old["ts"]))
+                continue
+            try:
+                ts = float(rec.get("ts") or time.time())
+            except (TypeError, ValueError):
+                ts = time.time()
+            item = {"id": mid, "from": str(frm), "to": str(to), "text": str(rec.get("text") or "")[:MAX_TEXT],
+                    "ts": ts, "mine": str(frm) == self.user, "status": "sent"}
+            self._remember(item, self._midx, self.history)
+            restored.append(item)
+        if restored:
+            self.history.sort(key=lambda it: it.get("ts", 0))
+        self.emit("history", items=restored)      # luôn phát (kể cả rỗng) để UI biết đã nạp xong lịch sử
 
     def _unique_path(self, name):
         # Tránh ghi đè file đã nhận trước đó (cùng tên từ hai người khác nhau): thêm " (n)" trước phần mở rộng.
@@ -381,7 +539,7 @@ class ClientCore:
             self._fail(item["id"], text)
             self.emit("error", ref=hdr.get("id"), text=text)
 
-    # ------------------------------------------------------------ sending
+    # ------------------------------------------------------------ gửi
     def _require(self):
         if not self.conn or self.conn.closed or self.status != "online":
             raise ConnectionError("not connected to the server")
@@ -389,7 +547,7 @@ class ClientCore:
 
     def send_message(self, to, text):
         # Mỗi tin là một stream riêng (mở + FIN ngay) nên không phải chờ tin trước hay file lớn gửi xong.
-        # `mid` do client sinh chỉ để đối chiếu SENT/ERR và hiển thị trạng thái gửi.
+        # `mid` do client tự sinh, chỉ để đối chiếu SENT/ERR và hiển thị trạng thái gửi.
         conn = self._require()
         mid = uuid.uuid4().hex[:12]
         sid = conn.open_stream(0)
@@ -401,40 +559,46 @@ class ClientCore:
         return mid
 
     async def send_file(self, to, name, size, chunks, fid=None):
-        """`chunks` is an async iterator of bytes (exactly `size` bytes in total)."""
-        # Mỗi file một stream ưu tiên thấp (1). `conn.drain` tạo back-pressure: tạm dừng đọc từ trình duyệt
-        # khi bộ đệm gửi đầy, nên RAM không tăng theo kích thước file. Tiến độ tính theo byte ĐÃ ĐƯỢC ACK.
-        conn = self._require()
+        """`chunks` là async iterator các byte (đúng `size` byte tổng cộng).
+
+        File đi TRỰC TIẾP giữa hai client (P2P): người gửi mở kết nối tới Endpoint của người nhận bằng chính
+        transport này (bắt tay + AES-GCM), server chỉ giới thiệu địa chỉ/khoá chứ không nhận byte nào.
+        """
+        self._require()                            # vẫn cần online để biết địa chỉ/khoá P2P của người nhận
         fid = fid or uuid.uuid4().hex[:12]
-        sid = conn.open_stream(1)
-        header = pack({"t": "FILE", "id": fid, "to": to, "name": name, "size": size})
-        conn.send(sid, header)
-        done_fut = conn.send_done(sid)
         item = {"id": fid, "from": self.user, "to": to, "name": name, "size": size, "ts": time.time(),
                 "mine": True, "status": "active", "done": 0, "dir": "up"}
         self._remember(item, self._fidx, self.files)
         self.emit("file_start", id=fid, name=name, size=size, frm=self.user, to=to, dir="up")
-
-        async def progress():
-            while True:
-                await asyncio.sleep(0.2)
-                off = conn.acked_offset(sid)
-                got = size if off is None else max(0, off - len(header))
-                item["done"] = min(got, size)
-                self.emit("file_progress", id=fid, done=item["done"], size=size, dir="up")
-        ptask = asyncio.ensure_future(progress())
+        conn = sid = ptask = None
         sha, sent, finished = hashlib.sha256(), 0, False
         try:
+            if self.max_file and size > self.max_file:
+                raise ConnectionError(f"invalid or too large file (limit {self.max_file // 2**20} MB)")
+            conn = await self._p2p_connect(to)     # bắt tay P2P trước khi đọc byte nào từ trình duyệt
+            sid = conn.open_stream(1)              # ưu tiên thấp hơn chat
+            header = pack({"t": "FILE", "id": fid, "from": self.user, "to": to, "name": name, "size": size})
+            conn.send(sid, header)
+            done_fut = conn.send_done(sid)
+
+            async def progress():
+                while True:
+                    await asyncio.sleep(0.2)
+                    off = conn.acked_offset(sid)
+                    got = size if off is None else max(0, off - len(header))
+                    item["done"] = min(got, size)
+                    self.emit("file_progress", id=fid, done=item["done"], size=size, dir="up")
+            ptask = asyncio.ensure_future(progress())
             async for chunk in chunks:
                 if fid in self.aborted:
                     break
                 sha.update(chunk)
                 sent += len(chunk)
                 conn.send(sid, chunk)
-                await conn.drain(sid)
+                await conn.drain(sid)             # back-pressure: RAM không tăng theo kích thước file
             if fid in self.aborted:
                 conn.send(sid, b"", fin=True)
-                raise ConnectionError("transfer rejected by server")
+                raise ConnectionError("transfer aborted")
             if sent != size:
                 raise ValueError("size mismatch")
             conn.send(sid, pack({"t": "FILE_END", "sha256": sha.hexdigest()}), fin=True)
@@ -446,14 +610,16 @@ class ClientCore:
             self.emit("file_sent", id=fid, name=name, size=size, to=to)
         except BaseException as exc:
             if not finished and item["status"] != "failed":
-                self._fail(fid, str(exc) or "transfer failed")
-                self.emit("error", ref=fid, text=str(exc) or "transfer failed")
+                text = str(exc) or "transfer failed"
+                self._fail(fid, text)
+                self.emit("error", ref=fid, text=text)
             raise
         finally:
-            ptask.cancel()
+            if ptask is not None:
+                ptask.cancel()
             self.aborted.discard(fid)              # dọn cờ huỷ để tập `aborted` không phình mãi
-            if not finished and not conn.closed:
-                try:                       # FIN without FILE_END: receiver drops its .part file instead of waiting forever
+            if not finished and conn is not None and sid is not None and not conn.closed:
+                try:                       # FIN mà không có FILE_END: bên nhận xoá file .part thay vì chờ mãi
                     conn.send(sid, b"", fin=True)
                 except Exception:
                     pass
