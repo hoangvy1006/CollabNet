@@ -12,7 +12,9 @@ __pycache__/
 server_data/
 client_state*/
 
-# Trạng thái cục bộ của graphify (chứa đường dẫn tuyệt đối của máy, không commit)
-graphify-out/.graphify_build_state.json
-graphify-out/.graphify_labels.json.sig
-graphify-out/.graphify_labels.pending.json
+# Trạng thái cục bộ của graphify (chứa đường dẫn tuyệt đối của máy, không commit).
+# Dùng **/ vì graphify được chạy trong source/ nên đầu ra nằm ở source/graphify-out/.
+**/graphify-out/.graphify_build_state.json
+**/graphify-out/.graphify_labels.json.sig
+**/graphify-out/.graphify_labels.pending.json
+**/graphify-out/cache/stat-index.json
