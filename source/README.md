@@ -63,10 +63,13 @@ python -m server.reset -y             # không hỏi xác nhận
 Mặc định giữ nguyên `server_identity.key` (fingerprint server không đổi); thêm `--with-identity` nếu muốn đổi khoá
 (khi đó client phải xoá mục cũ trong `client_state_<port>/known_hosts.json`).
 
-Script **từ chối chạy** khi cổng UDP của server (`--port`, mặc định 9000) hoặc cổng UI của client
-(`--ui-ports`, mặc định `8080,8081`) còn bận: server đang chạy sẽ ghi đè lại file, còn client còn phiên sẽ tự đăng
-nhập lại và tạo lại tài khoản ngay sau khi reset. Tắt hết server + client rồi chạy lại, hoặc thêm `--force` nếu
-chắc chắn các cổng đó không thuộc CollabNet. `--data-dir` để trỏ tới thư mục dữ liệu khác `./server_data`.
+Script **từ chối chạy** khi cổng UDP của server (`--port`, mặc định 9000) hoặc cổng UI của **bất kỳ client nào**
+còn bận: server đang chạy sẽ ghi đè lại file, còn client còn phiên sẽ tự đăng nhập lại và tạo lại tài khoản ngay
+sau khi reset. Phạm vi quét client mặc định là dải **8080–8099** (`--ui-ports`, nhận dải hoặc danh sách, vd
+`--ui-ports 8080-8090` hay `--ui-ports 8080,9090,9091`), **cộng thêm** mọi cổng có thư mục `client_state_<port>/`
+— nên client thứ 3, thứ 4... hay client chạy ở cổng lạ vẫn bị phát hiện. Tắt hết server + client rồi chạy lại,
+hoặc thêm `--force` nếu chắc chắn các cổng đó không thuộc CollabNet. `--data-dir` để trỏ tới thư mục dữ liệu khác
+`./server_data` (thư mục `client_state_*` được tìm cạnh thư mục dữ liệu đó).
 
 ## 5. Mô phỏng mạng xấu (kiểm thử)
 ```bash
