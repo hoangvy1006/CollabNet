@@ -2,7 +2,8 @@
 
 Lớp ClientCore giữ kết nối tới server, tự kết nối lại khi mất mạng, lưu lịch sử tin nhắn/tệp trong bộ nhớ
 và phát sự kiện (emit) cho UI. File nhận được ghi vào `*.part` rồi đổi tên sau khi kiểm tra SHA-256;
-file gửi đi theo P2P trực tiếp sang client của người nhận, không qua server.
+file gửi đi theo P2P trực tiếp (một người, hoặc fan-out tới từng người trong chat chung), không qua server.
+Byte dành cho người đang offline nằm trong outbox của người gửi và được đẩy P2P khi họ đăng nhập lại.
 """
 import asyncio
 import hashlib
@@ -56,6 +57,12 @@ class ClientCore:
         self.subscribers: set[asyncio.Queue] = set()
         self.rx: dict[int, dict] = {}
         self.aborted: set[str] = set()
+        self._outbox: dict[str, dict] = {}       # fid -> file đã spool, chờ đẩy P2P (kể cả chat chung)
+        self._file_locks: dict[str, asyncio.Lock] = {}
+        self._waiters: dict[str, asyncio.Future] = {}  # id -> FILE_OK / ERR từ server
+        self._flush_task = None
+        self._received: dict[str, str] = {}      # fid -> tên file đã lưu trong downloads
+        self._load_received()
         self._auth_fut = None
         self._ctrl = MsgBuffer()
         self._want_online = False
@@ -157,6 +164,8 @@ class ClientCore:
             self._restore_history(items)
         self.emit("status", status=self.status, user=self.user)
         self.emit("peers", peers=self.peers)
+        self._load_outbox()
+        self._schedule_flush()
         self._stats_on = True
         if self._stats_task is None or self._stats_task.done():
             self._stats_task = asyncio.ensure_future(self._stats_loop())
@@ -203,6 +212,10 @@ class ClientCore:
             self.ep.close()
         self.ep = self.conn = None
         self._ctrl_sid = None
+        for fut in list(self._waiters.values()):
+            if not fut.done():
+                fut.set_exception(ConnectionError("connection lost"))
+        self._waiters.clear()
         self._drop_p2p_conns()
         self.user, self.peers, self.status = None, [], "offline"
         if announce:
@@ -417,6 +430,11 @@ class ClientCore:
             self.peers = m["peers"]
             self._sync_p2p_cache()
             self.emit("peers", peers=self.peers)
+            self._schedule_flush()                 # người vừa online: đẩy file P2P còn nằm trong outbox
+        elif t == "FILE_OK":
+            fut = self._waiters.pop(m.get("ref"), None)
+            if fut is not None and not fut.done():
+                fut.set_result(m)
         elif t == "HISTORY":
             items = m.get("items") or []
             if self.user is None:
@@ -430,6 +448,9 @@ class ClientCore:
             self.emit("sent", ref=m.get("ref"), n=m.get("n"), ts=m.get("ts"))
         elif t == "ERR":
             ref, text = m.get("ref", ""), m.get("msg", "error")
+            fut = self._waiters.pop(ref, None)
+            if fut is not None and not fut.done():
+                fut.set_exception(ConnectionError(text))
             self.aborted.add(ref)
             self._fail(ref, text)
             self.emit("error", ref=ref, text=text)
@@ -447,29 +468,219 @@ class ClientCore:
         self.emit("msg", **item)
 
     def _restore_history(self, items):
-        """Nạp lại lịch sử server gửi sau khi đăng nhập (đăng xuất / tắt máy không còn mất hội thoại)."""
+        """Nạp lại lịch sử server gửi sau khi đăng nhập (tin nhắn và thẻ file lúc đang offline)."""
         restored = []
         for rec in items:
             if not isinstance(rec, dict):
                 continue
-            mid, frm, to = rec.get("id"), rec.get("from"), rec.get("to")
-            if not mid or not frm or not to:
-                continue
-            old = self._midx.get(mid)
-            if old is not None:                       # tin đã có trong RAM (tự kết nối lại): chỉ đồng bộ giờ
-                old.update(status="sent", ts=rec.get("ts", old["ts"]))
-                continue
-            try:
-                ts = float(rec.get("ts") or time.time())
-            except (TypeError, ValueError):
-                ts = time.time()
-            item = {"id": mid, "from": str(frm), "to": str(to), "text": str(rec.get("text") or "")[:MAX_TEXT],
-                    "ts": ts, "mine": str(frm) == self.user, "status": "sent"}
-            self._remember(item, self._midx, self.history)
-            restored.append(item)
+            if rec.get("kind") == "file":
+                self._restore_file(rec, restored)
+            else:
+                self._restore_message(rec, restored)
         if restored:
             self.history.sort(key=lambda it: it.get("ts", 0))
+            self.files.sort(key=lambda it: it.get("ts", 0))
         self.emit("history", items=restored)      # luôn phát (kể cả rỗng) để UI biết đã nạp xong lịch sử
+
+    def _restore_message(self, rec, restored):
+        mid, frm, to = rec.get("id"), rec.get("from"), rec.get("to")
+        if not mid or not frm or not to:
+            return
+        old = self._midx.get(mid)
+        if old is not None:                       # tin đã có trong RAM (tự kết nối lại): chỉ đồng bộ giờ
+            old.update(status="sent", ts=rec.get("ts", old["ts"]))
+            return
+        try:
+            ts = float(rec.get("ts") or time.time())
+        except (TypeError, ValueError):
+            ts = time.time()
+        item = {"id": mid, "from": str(frm), "to": str(to), "text": str(rec.get("text") or "")[:MAX_TEXT],
+                "ts": ts, "mine": str(frm) == self.user, "status": "sent"}
+        self._remember(item, self._midx, self.history)
+        restored.append(item)
+
+    def _restore_file(self, rec, restored):
+        """Thẻ file từ lịch sử. Byte tới sau bằng P2P nếu máy người gửi còn giữ outbox."""
+        fid, frm, to = rec.get("id"), rec.get("from"), rec.get("to")
+        if not fid or not frm or not to or self._fidx.get(fid) is not None:
+            return
+        try:
+            ts = float(rec.get("ts") or time.time())
+            size = int(rec.get("size") or 0)
+        except (TypeError, ValueError):
+            ts, size = time.time(), 0
+        mine = str(frm) == self.user
+        saved = self._received.get(str(fid))
+        on_disk = bool(saved) and os.path.isfile(os.path.join(self.download_dir, saved))
+        name = saved if on_disk else safe_filename(rec.get("name") or "file")
+        item = {"id": str(fid), "from": str(frm), "to": str(to), "name": name, "size": size, "ts": ts,
+                "mine": mine, "status": "done" if mine or on_disk else "queued",
+                "done": size if mine or on_disk else 0, "dir": "up" if mine else "down"}
+        self._remember(item, self._fidx, self.files)
+        restored.append({**item, "kind": "file"})
+
+    def _load_received(self):
+        path = os.path.join(self.state_dir, "received.json")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return
+        if isinstance(data, dict):
+            self._received = {str(k): str(v) for k, v in data.items() if v}
+
+    def _remember_download(self, fid, name):
+        if not fid or not name:
+            return
+        self._received[str(fid)] = name
+        try:
+            atomic_write_json(os.path.join(self.state_dir, "received.json"), self._received)
+        except OSError:
+            log.exception("cannot write received file index")
+
+    def _outbox_dir(self):
+        path = os.path.join(self.state_dir, "outbox")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _outbox_path(self, fid):
+        return os.path.join(self._outbox_dir(), fid + ".bin")
+
+    def _load_outbox(self):
+        """Nạp file còn phải đẩy P2P (người gửi đăng nhập lại sau khi người nhận từng offline)."""
+        index = os.path.join(self._outbox_dir(), "index.json")
+        try:
+            with open(index, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        for fid, meta in data.items():
+            if not isinstance(meta, dict):
+                continue
+            path = self._outbox_path(str(fid))
+            if not os.path.isfile(path):
+                continue
+            self._outbox[str(fid)] = {
+                "id": str(fid), "to": str(meta.get("to") or "*"), "name": str(meta.get("name") or "file"),
+                "size": int(meta.get("size") or 0), "sha256": str(meta.get("sha256") or ""),
+                "delivered": set(meta.get("delivered") or []), "path": path,
+            }
+
+    def _save_outbox_index(self):
+        index = {fid: {"to": m["to"], "name": m["name"], "size": m["size"], "sha256": m["sha256"],
+                       "delivered": sorted(m["delivered"])}
+                 for fid, m in self._outbox.items()}
+        try:
+            atomic_write_json(os.path.join(self._outbox_dir(), "index.json"), index)
+        except OSError:
+            log.exception("cannot write file outbox index")
+
+    def _drop_spool(self, fid):
+        meta = self._outbox.pop(fid, None)
+        if meta is not None:
+            try:
+                os.remove(meta["path"])
+            except OSError:
+                pass
+        self._save_outbox_index()
+
+    def _schedule_flush(self):
+        if self.status != "online":
+            return
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = asyncio.ensure_future(self._flush_all())
+
+    def _online_targets(self, to):
+        """Người đang online và có cổng P2P. Chat chung là mọi người trừ chính mình."""
+        def ready(peer):
+            user = peer.get("user")
+            return bool(user) and user != self.user and peer.get("p2p_port") and peer.get("p2p_fp")
+
+        if to == "*":
+            return [p["user"] for p in self.peers if ready(p)]
+        peer = next((p for p in self.peers if p.get("user") == to), None)
+        return [to] if peer is not None and ready(peer) else []
+
+    async def _announce_file(self, meta):
+        """Báo server ghi thẻ file (không kèm byte) để người offline thấy khi đăng nhập lại."""
+        fut = self.loop.create_future()
+        self._waiters[meta["id"]] = fut
+        self.conn.send(self._ctrl_sid, pack({
+            "t": "FILE_LOG", "id": meta["id"], "to": meta["to"], "name": meta["name"],
+            "size": meta["size"], "sha256": meta["sha256"],
+        }))
+        try:
+            await asyncio.wait_for(fut, 8)
+        except asyncio.TimeoutError:
+            self._waiters.pop(meta["id"], None)
+            raise ConnectionError("server did not accept the file")
+
+    async def _p2p_push(self, user, meta, item=None):
+        """Đẩy một file đã nằm trên đĩa sang `user` bằng kết nối P2P."""
+        conn = await self._p2p_connect(user)
+        sid = conn.open_stream(1)
+        header = pack({"t": "FILE", "id": meta["id"], "from": self.user, "to": meta["to"],
+                       "name": meta["name"], "size": meta["size"]})
+        conn.send(sid, header)
+        done_fut = conn.send_done(sid)
+        size = meta["size"]
+        sent = 0
+        with open(meta["path"], "rb") as fh:
+            while True:
+                chunk = fh.read(65536)
+                if not chunk:
+                    break
+                if meta["id"] in self.aborted:
+                    conn.send(sid, b"", fin=True)
+                    raise ConnectionError("transfer aborted")
+                sent += len(chunk)
+                conn.send(sid, chunk)
+                await conn.drain(sid)
+                if item is not None and item.get("status") != "done":
+                    item["done"] = min(sent, size)
+                    item["status"] = "active"
+                    self.emit("file_progress", id=meta["id"], done=item["done"], size=size, dir="up")
+        if sent != size:
+            conn.send(sid, b"", fin=True)
+            raise ConnectionError("spooled file is incomplete")
+        conn.send(sid, pack({"t": "FILE_END", "sha256": meta["sha256"]}), fin=True)
+        if not await done_fut:
+            raise ConnectionError("connection lost during transfer")
+
+    async def _flush_all(self):
+        for fid in list(self._outbox):
+            try:
+                await self._flush_one(fid)
+            except Exception:
+                log.exception("could not deliver pending file %s", fid)
+
+    async def _flush_one(self, fid):
+        meta = self._outbox.get(fid)
+        if meta is None or not os.path.isfile(meta["path"]):
+            return
+        lock = self._file_locks.setdefault(fid, asyncio.Lock())
+        async with lock:
+            meta = self._outbox.get(fid)
+            if meta is None:
+                return
+            item = self._fidx.get(fid)
+            for user in self._online_targets(meta["to"]):
+                if user in meta["delivered"]:
+                    continue
+                try:
+                    await self._p2p_push(user, meta, item)
+                except Exception as exc:
+                    log.info("P2P file %s to %s failed: %s", fid, user, exc)
+                    continue
+                meta["delivered"].add(user)
+            self._save_outbox_index()
+            if meta["to"] != "*" and meta["to"] in meta["delivered"]:
+                if item is not None and item.get("status") != "done":
+                    item.update(status="done", done=meta["size"], ts=time.time())
+                    self.emit("file_sent", id=fid, name=meta["name"], size=meta["size"], to=meta["to"])
+                self._drop_spool(fid)
 
     def _unique_path(self, name):
         # Tránh ghi đè file đã nhận trước đó (cùng tên từ hai người khác nhau): thêm " (n)" trước phần mở rộng.
@@ -491,12 +702,19 @@ class ClientCore:
         path = self._unique_path(hdr.get("name", "file"))
         st.update(kind="file", hdr=hdr, path=path, fh=open(path + ".part", "wb"), sha=hashlib.sha256(),
                   remaining=size, got=0, last_emit=0.0, trailer=None)
-        item = {"id": hdr.get("id"), "from": hdr.get("from"), "to": self.user, "name": os.path.basename(path),
-                "size": st["remaining"], "ts": time.time(), "mine": False, "status": "active", "done": 0, "dir": "down"}
-        self._remember(item, self._fidx, self.files)
+        dest = "*" if hdr.get("to") == "*" else self.user
+        item = self._fidx.get(hdr.get("id"))
+        if item is None:
+            item = {"id": hdr.get("id"), "from": hdr.get("from"), "to": dest, "name": os.path.basename(path),
+                    "size": st["remaining"], "ts": time.time(), "mine": False, "status": "active",
+                    "done": 0, "dir": "down"}
+            self._remember(item, self._fidx, self.files)
+        else:
+            item.update(status="active", done=0, dir="down", to=dest, name=os.path.basename(path),
+                        size=st["remaining"], error=None)
         st["item"] = item
         self.emit("file_start", id=item["id"], name=item["name"], size=item["size"], frm=item["from"],
-                  to=self.user, dir="down")
+                  to=dest, dir="down")
 
     def _file_data(self, st, fin):
         # Thân file là `size` byte thô, theo sau là thông điệp FILE_END chứa SHA-256. Ghi theo từng mảnh
@@ -529,6 +747,7 @@ class ClientCore:
         if ok:
             os.replace(path + ".part", path)
             item.update(status="done", done=item["size"], ts=time.time())
+            self._remember_download(item["id"], item["name"])
             self.emit("file_received", id=item["id"], **{k: item[k] for k in ("from", "name", "size", "ts")})
         else:
             try:
@@ -561,54 +780,101 @@ class ClientCore:
     async def send_file(self, to, name, size, chunks, fid=None):
         """`chunks` là async iterator các byte (đúng `size` byte tổng cộng).
 
-        File đi TRỰC TIẾP giữa hai client (P2P): người gửi mở kết nối tới Endpoint của người nhận bằng chính
-        transport này (bắt tay + AES-GCM), server chỉ giới thiệu địa chỉ/khoá chứ không nhận byte nào.
+        File đi TRỰC TIẾP giữa các client (P2P). `to == "*"` gửi vào chat chung: một kết nối P2P tới từng
+        người đang online. Người đang offline không nhận byte qua server; byte nằm trong outbox của người
+        gửi và được đẩy khi họ xuất hiện lại. Server chỉ nhận thẻ FILE_LOG để hiện file trong lịch sử.
         """
-        self._require()                            # vẫn cần online để biết địa chỉ/khoá P2P của người nhận
+        self._require()                            # vẫn cần online để biết địa chỉ/khoá P2P và ghi lịch sử
+        if to != "*" and to == self.user:
+            raise ConnectionError("cannot send a file to yourself")
+        if self.max_file and size > self.max_file:
+            raise ConnectionError(f"invalid or too large file (limit {self.max_file // 2**20} MB)")
         fid = fid or uuid.uuid4().hex[:12]
         item = {"id": fid, "from": self.user, "to": to, "name": name, "size": size, "ts": time.time(),
                 "mine": True, "status": "active", "done": 0, "dir": "up"}
         self._remember(item, self._fidx, self.files)
         self.emit("file_start", id=fid, name=name, size=size, frm=self.user, to=to, dir="up")
+        lock = self._file_locks.setdefault(fid, asyncio.Lock())
+        async with lock:
+            return await self._send_file_locked(to, name, size, chunks, fid, item)
+
+    async def _send_file_locked(self, to, name, size, chunks, fid, item):
+        path = self._outbox_path(fid)
         conn = sid = ptask = None
         sha, sent, finished = hashlib.sha256(), 0, False
+        primary = None
         try:
-            if self.max_file and size > self.max_file:
-                raise ConnectionError(f"invalid or too large file (limit {self.max_file // 2**20} MB)")
-            conn = await self._p2p_connect(to)     # bắt tay P2P trước khi đọc byte nào từ trình duyệt
-            sid = conn.open_stream(1)              # ưu tiên thấp hơn chat
-            header = pack({"t": "FILE", "id": fid, "from": self.user, "to": to, "name": name, "size": size})
-            conn.send(sid, header)
-            done_fut = conn.send_done(sid)
+            targets = self._online_targets(to)
+            primary = targets[0] if targets else None
+            if primary is not None:
+                conn = await self._p2p_connect(primary)
+                sid = conn.open_stream(1)
+                header = pack({"t": "FILE", "id": fid, "from": self.user, "to": to, "name": name, "size": size})
+                conn.send(sid, header)
+                done_fut = conn.send_done(sid)
 
-            async def progress():
-                while True:
-                    await asyncio.sleep(0.2)
-                    off = conn.acked_offset(sid)
-                    got = size if off is None else max(0, off - len(header))
-                    item["done"] = min(got, size)
-                    self.emit("file_progress", id=fid, done=item["done"], size=size, dir="up")
-            ptask = asyncio.ensure_future(progress())
-            async for chunk in chunks:
-                if fid in self.aborted:
-                    break
-                sha.update(chunk)
-                sent += len(chunk)
-                conn.send(sid, chunk)
-                await conn.drain(sid)             # back-pressure: RAM không tăng theo kích thước file
-            if fid in self.aborted:
-                conn.send(sid, b"", fin=True)
-                raise ConnectionError("transfer aborted")
+                async def progress():
+                    while True:
+                        await asyncio.sleep(0.2)
+                        off = conn.acked_offset(sid)
+                        got = size if off is None else max(0, off - len(header))
+                        item["done"] = min(got, size)
+                        self.emit("file_progress", id=fid, done=item["done"], size=size, dir="up")
+                ptask = asyncio.ensure_future(progress())
+            with open(path, "wb") as fh:
+                async for chunk in chunks:
+                    if fid in self.aborted:
+                        raise ConnectionError("transfer aborted")
+                    sha.update(chunk)
+                    sent += len(chunk)
+                    fh.write(chunk)
+                    if conn is not None:
+                        conn.send(sid, chunk)
+                        await conn.drain(sid)     # back-pressure: RAM không tăng theo kích thước file
             if sent != size:
                 raise ValueError("size mismatch")
-            conn.send(sid, pack({"t": "FILE_END", "sha256": sha.hexdigest()}), fin=True)
-            if not await done_fut:
-                raise ConnectionError("connection lost during transfer")
+            digest = sha.hexdigest()
+            delivered = set()
+            if conn is not None:
+                conn.send(sid, pack({"t": "FILE_END", "sha256": digest}), fin=True)
+                if not await done_fut:
+                    raise ConnectionError("connection lost during transfer")
+                delivered.add(primary)
+            meta = {"id": fid, "to": to, "name": name, "size": size, "sha256": digest,
+                    "delivered": delivered, "path": path}
+            self._outbox[fid] = meta
+            self._save_outbox_index()
+            await self._announce_file(meta)
+            for user in targets[1:]:
+                try:
+                    await self._p2p_push(user, meta, item)
+                except Exception as exc:
+                    log.info("P2P file %s to %s failed: %s", fid, user, exc)
+                    continue
+                meta["delivered"].add(user)
+            self._save_outbox_index()
             finished = True
-            item.update(status="done", done=size, ts=time.time())
-            self.emit("file_progress", id=fid, done=size, size=size, dir="up")
-            self.emit("file_sent", id=fid, name=name, size=size, to=to)
+            if to != "*" and to not in meta["delivered"]:
+                item.update(status="queued", done=0)
+                self.emit("file_queued", id=fid, name=name, size=size, to=to)
+            else:
+                item.update(status="done", done=size, ts=time.time())
+                self.emit("file_progress", id=fid, done=size, size=size, dir="up")
+                self.emit("file_sent", id=fid, name=name, size=size, to=to)
+                if to != "*":
+                    self._drop_spool(fid)          # chat riêng đã tới nơi; chat chung giữ outbox cho người offline
         except BaseException as exc:
+            if sent != size:
+                self._outbox.pop(fid, None)
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            elif fid not in self._outbox and os.path.isfile(path):
+                # Đã spool đủ nhưng P2P tới người đang online thất bại: giữ file để đẩy lại.
+                self._outbox[fid] = {"id": fid, "to": to, "name": name, "size": size,
+                                     "sha256": sha.hexdigest(), "delivered": set(), "path": path}
+                self._save_outbox_index()
             if not finished and item["status"] != "failed":
                 text = str(exc) or "transfer failed"
                 self._fail(fid, text)

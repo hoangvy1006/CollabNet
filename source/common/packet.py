@@ -1,4 +1,4 @@
-"""Khuôn dạng gói tin của transport CollabNet (giao thức nhỏ kiểu QUIC trên UDP).
+"""Khuôn dạng gói tin của transport CollabNet (giao thức trên UDP).
 
 Bố cục một datagram::
 

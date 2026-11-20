@@ -34,14 +34,15 @@ Mỗi client lưu file nhận và khoá server đã ghim trong `./client_state_<
 
 Cách dùng UI:
 * Cột trái là danh sách cuộc trò chuyện: **Cả nhóm** (chat chung) và từng người (chat riêng). Mỗi cuộc có luồng tin nhắn riêng,
-  badge tin chưa đọc, bản nháp riêng; hội thoại với người đã offline vẫn được giữ lại (chỉ không gửi được).
-* Lịch sử tin nhắn do **server** lưu (`server_data/history.json`): đăng xuất hoặc tắt máy rồi đăng nhập lại vẫn thấy
-  đầy đủ các đoạn chat cũ. Client không giữ lịch sử giữa các phiên — sau khi xác thực server gửi lại ngay (`HISTORY`).
+  badge tin chưa đọc, bản nháp riêng. Người đã offline vẫn nhận được tin nhắn và file: server lưu hội thoại,
+  byte file nằm trong outbox của người gửi và được đẩy P2P khi họ đăng nhập lại.
+* Lịch sử tin nhắn và thẻ file do **server** lưu (`server_data/history.json`): đăng xuất hoặc tắt máy rồi đăng nhập lại
+  vẫn thấy chat chung lẫn chat riêng. Client không giữ lịch sử giữa các phiên — sau khi xác thực server gửi lại ngay (`HISTORY`).
   Tài khoản mới chỉ nhận tin **chung** phát sinh từ thời điểm tài khoản được tạo (`server_data/first_seen.json`),
   nên không thấy hội thoại chung diễn ra trước khi nó tồn tại.
-  (File đã nhận vẫn nằm trong thư mục `downloads`; thẻ file trong khung chat thuộc về phiên đang chạy.)
+  File đã nhận nằm trong `downloads` và được ghi vào `received.json` để thẻ file khôi phục trỏ đúng file trên đĩa.
 * Enter để gửi, Shift+Enter xuống dòng; link tự động bấm được; tin gửi lỗi có nút **Gửi lại**; nhiều biểu tượng cảm xúc sẵn có.
-* Gửi file: nút 📎, kéo-thả hoặc dán ảnh (Ctrl+V). Có thể chọn nhiều file. Từ khung chat chung, ứng dụng hỏi gửi cho ai.
+* Gửi file: nút 📎, kéo-thả hoặc dán ảnh (Ctrl+V), ở cả khung **Cả nhóm** lẫn chat riêng. Có thể chọn nhiều file.
   Thẻ file hiển thị phần trăm, tốc độ, thời gian còn lại, nút huỷ/gửi lại/tải về và xem trước ảnh.
   **File đi thẳng từ máy người gửi sang máy người nhận (P2P)**: mỗi client mở một cổng UDP riêng và công bố
   cổng + fingerprint khoá Ed25519 của mình qua server; người gửi kết nối trực tiếp và xác minh đúng khoá đó.

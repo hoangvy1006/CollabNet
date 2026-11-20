@@ -6,10 +6,11 @@ server làm 4 việc chính trên một socket UDP duy nhất (asyncio, không t
   1. Xác thực (AUTH) và đăng ký tài khoản mới ở lần đăng nhập đầu; mật khẩu lưu dạng PBKDF2 có muối.
   2. Theo dõi presence: ai đang online, IP/port và cổng + khoá P2P nào, phát danh sách PEERS khi có thay đổi.
   3. Định tuyến tin nhắn (broadcast "*" hoặc riêng tư), mỗi tin một stream nên không bị chặn bởi file lớn.
+     Tin riêng gửi khi người nhận đang offline vẫn được lưu và trả lại lúc họ đăng nhập.
   4. Lưu lịch sử hội thoại (history.json) và gửi lại cho client ngay sau khi đăng nhập: đăng xuất / tắt máy
-     rồi vào lại vẫn còn các đoạn chat cũ.
-Chuyển file KHÔNG đi qua server: server chỉ giới thiệu địa chỉ + khoá của từng peer, còn hai client kết nối
-TRỰC TIẾP với nhau (P2P) bằng chính transport này.
+     rồi vào lại vẫn còn tin chung, tin riêng, và thẻ file đã gửi trong lúc họ vắng mặt.
+Chuyển file KHÔNG đi qua server: byte đi P2P (chat chung = một kết nối trực tiếp tới từng người đang online).
+Server chỉ lưu thẻ FILE_LOG (tên, kích thước, SHA-256) để người offline thấy file khi đăng nhập lại.
 """
 import argparse
 import asyncio
@@ -21,7 +22,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common import crypto
 from common.discovery import Beacon
-from common.protocol import MAX_TEXT, USERNAME_RE, MsgBuffer, ProtocolError, pack
+from common.protocol import MAX_TEXT, USERNAME_RE, MsgBuffer, ProtocolError, pack, safe_filename
 from common.transport import Endpoint
 from server.history import HistoryStore
 from server.users import UserStore
@@ -152,6 +153,8 @@ class Server:
                 raise ProtocolError("authenticate first")
             elif t == "LIST":
                 self._send_ctrl(s, {"t": "PEERS", "peers": self._peers()})
+            elif t == "FILE_LOG":
+                self._log_file(s, m)
             elif t == "BYE":
                 s.conn.close(0, "bye")
             else:
@@ -246,18 +249,46 @@ class Server:
                "ts": time.time()}
         if to == "*":
             targets = [d for u, d in self.by_user.items() if u != s.user]
-        elif to in self.by_user and to != s.user:
-            targets = [self.by_user[to]]
+        elif to != s.user and self.store.has_user(to):
+            # Người nhận offline (hoặc vừa rớt, session chưa gỡ): vẫn lưu, trả lại khi họ đăng nhập.
+            dest = self.by_user.get(to)
+            targets = [dest] if dest is not None else []
         else:
             self._send_ctrl(s, {"t": "ERR", "ref": mid, "msg": f"user '{to}' is not online"})
             return
         delivered = sum(1 for d in targets if self._deliver(d, out))
-        if delivered == 0 and to != "*":              # người nhận vừa rớt mạng: báo lỗi chứ không báo "đã gửi"
-            self._send_ctrl(s, {"t": "ERR", "ref": mid, "msg": f"user '{to}' is not online"})
-            return
         if mid:                                       # giữ lại cho lần đăng nhập sau (lịch sử chat)
             self.history.add({"id": mid, "from": s.user, "to": to, "text": out["text"], "ts": out["ts"]})
         self._send_ctrl(s, {"t": "SENT", "ref": mid, "ts": out["ts"], "n": delivered})
+
+    def _log_file(self, s, m):
+        """Ghi thẻ file vào lịch sử. Byte của file không đi qua đây — client tự chuyển P2P."""
+        to = str(m.get("to", "*"))[:64]
+        fid = str(m.get("id", ""))[:64]
+        if not fid:
+            raise ProtocolError("missing file id")
+        try:
+            size = int(m.get("size"))
+        except (TypeError, ValueError):
+            size = -1
+        if size < 0 or (self.max_file and size > self.max_file):
+            self._send_ctrl(s, {"t": "ERR", "ref": fid, "msg": "invalid or too large file"})
+            return
+        sha = str(m.get("sha256") or "")
+        if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
+            self._send_ctrl(s, {"t": "ERR", "ref": fid, "msg": "invalid file checksum"})
+            return
+        if to != "*" and (to == s.user or not self.store.has_user(to)):
+            self._send_ctrl(s, {"t": "ERR", "ref": fid, "msg": f"user '{to}' is not online"})
+            return
+        name = safe_filename(m.get("name", "file"))
+        if any(r.get("id") == fid for r in self.history.records):
+            self._send_ctrl(s, {"t": "FILE_OK", "ref": fid, "ts": time.time()})
+            return
+        ts = time.time()
+        self.history.add({"id": fid, "from": s.user, "to": to, "text": "", "kind": "file",
+                          "name": name, "size": size, "sha256": sha, "ts": ts})
+        self._send_ctrl(s, {"t": "FILE_OK", "ref": fid, "ts": ts})
 
 
 async def amain(args):

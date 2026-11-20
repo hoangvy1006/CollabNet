@@ -47,6 +47,11 @@ class UserStore:
         with self.lock:
             return float(self.first_seen.get(user) or 0.0)
 
+    def has_user(self, user) -> bool:
+        """True nếu tên này đã đăng ký (để giữ tin/file cho người đang offline, không phải tên bịa)."""
+        with self.lock:
+            return user in self.users
+
     def check_or_register(self, user, password):
         """Trả về (ok, thông điệp). Tên chưa tồn tại sẽ được đăng ký với mật khẩu này (tối thiểu 4 ký tự).
 

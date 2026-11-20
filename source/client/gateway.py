@@ -259,8 +259,9 @@ class Gateway:
         to = urllib.parse.unquote(headers.get("x-to", ""))
         name = safe_filename(urllib.parse.unquote(headers.get("x-filename", "file")))
         fid = headers.get("x-file-id") or None
-        if not to or to == "*":
-            raise HttpError(400, "choose a single recipient for file transfer")
+        # "*" là chat chung: core fan-out P2P tới từng người đang online và giữ outbox cho người offline.
+        if not to:
+            raise HttpError(400, "missing recipient")
 
         async def body():
             remaining = size

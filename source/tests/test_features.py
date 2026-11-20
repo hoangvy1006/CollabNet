@@ -1,6 +1,7 @@
 """Kiểm thử các tính năng chat/file mà người dùng thấy được: trạng thái gửi, sắp xếp theo giờ server,
 upload bị ngắt giữa chừng, giới hạn kích thước file, xem trước ảnh và lịch sử sau khi đăng xuất.
 """
+import hashlib
 import os
 import sys
 import unittest
@@ -26,11 +27,12 @@ class FeatureTests(E2E):
         await bob.logout()
         mid2 = alice.send_message("*", "có ai không?")
         self.assertEqual((await ca.wait("sent", lambda d: d["ref"] == mid2))["n"], 0)
-        # tin gửi người offline bị đánh dấu lỗi trong snapshot (còn sau khi tải lại UI)
+        # tin riêng gửi khi bob đã đăng xuất vẫn được server lưu (n = 0 người đang online)
         mid3 = alice.send_message("bob", "bob ơi")
-        await ca.wait("error", lambda d: d["ref"] == mid3)
-        failed = [m for m in alice.snapshot()["history"] if m["id"] == mid3][0]
-        self.assertEqual(failed["status"], "failed")
+        offline = await ca.wait("sent", lambda d: d["ref"] == mid3)
+        self.assertEqual(offline["n"], 0)
+        kept = [m for m in alice.snapshot()["history"] if m["id"] == mid3][0]
+        self.assertEqual(kept["status"], "sent")
 
     async def test_file_items_and_limit_announced(self):
         alice, ca = await self.client("alice")
@@ -75,6 +77,43 @@ class FeatureTests(E2E):
         texts = [m["text"] for m in (await cc_.wait("history"))["items"]]
         self.assertIn("tin chung sau khi carol vào", texts)
         self.assertNotIn("tin chung trước khi carol tồn tại", texts)
+
+    async def test_group_file_and_offline_delivery(self):
+        """Chat chung nhận file; người offline vẫn nhận tin và file (nhóm + riêng) khi đăng nhập lại."""
+        alice, ca = await self.client("alice")
+        bob, cb = await self.client("bob")
+        carol, cc_ = await self.client("carol")
+        await bob.logout()
+        alice.send_message("bob", "riêng khi vắng")
+        await ca.wait("sent", lambda d: d["n"] == 0)
+        alice.send_message("*", "nhóm khi bob vắng")
+        await cc_.wait("msg", lambda d: d["text"] == "nhóm khi bob vắng")
+        private = os.urandom(50_000)
+        await alice.send_file("bob", "rieng.bin", len(private), chunked(private))
+        queued = await ca.wait("file_queued")
+        self.assertEqual(queued["to"], "bob")
+        group = os.urandom(40_000)
+        await alice.send_file("*", "nhom.bin", len(group), chunked(group))
+        got_carol = await cc_.wait("file_received", lambda d: d["name"].startswith("nhom"))
+        self.assertEqual(got_carol["size"], len(group))
+        carol_item = [f for f in carol.files if f["id"] == got_carol["id"]][0]
+        self.assertEqual(carol_item["to"], "*")
+        with open(os.path.join(carol.download_dir, got_carol["name"]), "rb") as fh:
+            self.assertEqual(hashlib.sha256(fh.read()).digest(), hashlib.sha256(group).digest())
+        await bob.login("127.0.0.1", self.server.port, "bob", "secret")
+        hist = await cb.wait("history", lambda d: d["items"])
+        texts = [m.get("text") for m in hist["items"]]
+        self.assertIn("riêng khi vắng", texts)
+        self.assertIn("nhóm khi bob vắng", texts)
+        cards = {m["name"]: m for m in hist["items"] if m.get("kind") == "file"}
+        self.assertEqual(cards["rieng.bin"]["to"], "bob")
+        self.assertEqual(cards["nhom.bin"]["to"], "*")
+        got_private = await cb.wait("file_received", lambda d: d["name"].startswith("rieng"))
+        got_group = await cb.wait("file_received", lambda d: d["name"].startswith("nhom"))
+        for rec, raw in ((got_private, private), (got_group, group)):
+            with open(os.path.join(bob.download_dir, rec["name"]), "rb") as fh:
+                self.assertEqual(hashlib.sha256(fh.read()).digest(), hashlib.sha256(raw).digest())
+        self.assertEqual([f for f in bob.files if f["id"] == got_group["id"]][0]["to"], "*")
 
     async def test_interrupted_upload_does_not_leave_receiver_hanging(self):
         alice, ca = await self.client("alice")

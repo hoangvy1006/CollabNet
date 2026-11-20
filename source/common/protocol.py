@@ -7,7 +7,9 @@ Cách dùng stream (chìa khoá để không bị head-of-line blocking):
     stream 1 của server : điều khiển (AUTH_OK/FAIL, PEERS, HISTORY, SENT, ERR)  sống lâu
     mỗi tin nhắn mở một stream mới : {"t":"MSG", ...}                     FIN sau khi gửi xong tin
     mỗi file mở một stream mới     : {"t":"FILE",...} + byte thô + {"t":"FILE_END","sha256":..}  FIN
-                                       (P2P: mở trên kết nối TRỰC TIẾP giữa hai client, không qua server)
+                                       (P2P: mở trên kết nối TRỰC TIẾP giữa hai client, không qua server;
+                                        chat chung = người gửi mở một kết nối P2P tới từng người đang online.
+                                        {"t":"FILE_LOG"} trên stream điều khiển chỉ ghi thẻ file vào lịch sử.)
 """
 import json
 import re

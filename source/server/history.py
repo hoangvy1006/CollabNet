@@ -1,7 +1,8 @@
 """Lịch sử hội thoại phía server: người dùng đăng xuất / tắt máy rồi vào lại vẫn còn các đoạn chat cũ.
 
-Server là nguồn lưu trữ duy nhất (client chỉ giữ bản trong RAM của phiên hiện tại): mỗi tin nhắn đã định
-tuyến được ghi vào `history.json` trong thư mục dữ liệu của server và được gửi lại ngay sau khi xác thực.
+Server là nguồn lưu trữ duy nhất cho tin nhắn (client chỉ giữ bản trong RAM của phiên hiện tại): mỗi tin
+đã định tuyến — kể cả tin gửi khi người nhận đang offline — được ghi vào `history.json` và gửi lại ngay
+sau khi xác thực. File vẫn đi P2P; server chỉ lưu thẻ mô tả (tên, kích thước, SHA-256), không lưu byte.
 
 Ghi đĩa được gom lại (debounce 1 giây) nên một đợt chat nhanh không tạo ra hàng loạt lần ghi, và luôn ghi
 nguyên tử (`atomic_write_json`) để mất điện giữa chừng không làm hỏng file.
@@ -63,7 +64,7 @@ class HistoryStore:
                         continue                          # mốc giờ hỏng: bỏ qua cho an toàn
             elif rec.get("from") != user and rec.get("to") != user:
                 continue
-            total += len(rec.get("text") or "") + 96
+            total += len(rec.get("text") or "") + len(rec.get("name") or "") + 128
             if picked and (total > MAX_REPLAY_BYTES or len(picked) >= MAX_REPLAY):
                 break
             picked.append(rec)

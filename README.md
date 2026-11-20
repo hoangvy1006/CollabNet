@@ -38,9 +38,9 @@ Mỗi client lưu file nhận và khoá server đã ghim trong `./client_state_<
 
 Cách dùng UI:
 * Cột trái là danh sách cuộc trò chuyện: **Cả nhóm** (chat chung) và từng người (chat riêng). Mỗi cuộc có luồng tin nhắn riêng,
-  badge tin chưa đọc, bản nháp riêng; hội thoại với người đã offline vẫn được giữ lại (chỉ không gửi được).
+  badge tin chưa đọc, bản nháp riêng. Người đã offline vẫn nhận được tin nhắn và file khi đăng nhập lại.
 * Enter để gửi, Shift+Enter xuống dòng; link tự động bấm được; tin gửi lỗi có nút **Gửi lại**; nhiều biểu tượng cảm xúc sẵn có.
-* Gửi file: nút 📎, kéo-thả hoặc dán ảnh (Ctrl+V). Có thể chọn nhiều file. Từ khung chat chung, ứng dụng hỏi gửi cho ai.
+* Gửi file: nút 📎, kéo-thả hoặc dán ảnh (Ctrl+V), kể cả trong khung chat chung. Có thể chọn nhiều file.
   Thẻ file hiển thị phần trăm, tốc độ, thời gian còn lại, nút huỷ/gửi lại/tải về và xem trước ảnh.
 * Bảng bên phải: biểu đồ RTT, cwnd, gói mất theo thời gian thực (thuật toán CUBIC/BBR) và danh sách tệp của cuộc trò chuyện.
 * Giao diện sáng/tối (tự theo hệ thống, có nút đổi). Font Be Vietnam Pro được đóng gói sẵn trong `client/web/fonts` (giấy phép OFL),

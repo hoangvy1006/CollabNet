@@ -76,7 +76,7 @@ function conv(key) {
   if (!c) { c = { key, items: [], byId: new Map() }; S.convs.set(key, c); }
   return c;
 }
-const convKey = (it) => it.type === "msg" ? (it.to === "*" ? "*" : it.mine ? it.to : it.from) : (it.mine ? it.to : it.from);
+const convKey = (it) => (it.to === "*" ? "*" : it.mine ? it.to : it.from);
 /* Xếp theo ts của server: mỗi tin đi một stream riêng nên có thể đến không đúng thứ tự (đó là cái giá của việc không bị HoL). */
 function addItem(it) {
   const c = conv(convKey(it));
@@ -97,8 +97,16 @@ function removeItem(id) {
   f.c.byId.delete(id); f.c.items.splice(f.c.items.indexOf(f.it), 1);
   const n = S.nodes.get(id); if (n) { n.row.remove(); S.nodes.delete(id); }
 }
+function asItem(m) {
+  if (m.kind === "file" || m.type === "file") {
+    const it = { type: "file", phase: "net", status: "queued", done: 0, ...m };
+    delete it.kind;
+    return it;
+  }
+  return { type: "msg", ...m };
+}
 function hydrate(snap) {
-  for (const m of snap.history || []) addItem({ type: "msg", ...m });
+  for (const m of snap.history || []) addItem(asItem(m));
   for (const f of snap.files || []) { const old = findItem(f.id); if (!old || old.it.phase !== "upload") addItem({ type: "file", phase: "net", ...f }); }
   renderAll(true);
 }
@@ -160,12 +168,12 @@ function renderHead() {
   updateComposer();
 }
 function updateComposer() {
-  const k = S.active, gone = k !== "*" && !peerOf(k), ok = S.online && !gone;
+  const k = S.active, gone = k !== "*" && !peerOf(k), ok = S.online;
   const t = $("text");
-  t.disabled = !ok; $("sendBtn").disabled = !ok || !t.value.trim(); $("attach").disabled = !S.online;
-  t.placeholder = !S.online ? "Đang chờ kết nối…" : gone ? k + " đang offline" : k === "*" ? "Nhắn cho cả nhóm" : "Nhắn cho " + k;
+  t.disabled = !ok; $("sendBtn").disabled = !ok || !t.value.trim(); $("attach").disabled = !ok;
+  t.placeholder = !S.online ? "Đang chờ kết nối…" : gone ? "Nhắn cho " + k + " (nhận khi họ đăng nhập lại)" : k === "*" ? "Nhắn hoặc gửi file cho cả nhóm" : "Nhắn cho " + k;
   const n = $("cnotice");
-  if (gone) { n.textContent = k + " đang offline nên chưa thể nhận tin. Tin cũ vẫn được giữ lại ở đây."; n.classList.remove("hidden"); }
+  if (gone && ok) { n.textContent = k + " đang offline. Tin nhắn và file vẫn được gửi; họ sẽ thấy khi đăng nhập lại."; n.classList.remove("hidden"); }
   else n.classList.add("hidden");
 }
 function openConv(k, keepPane) {
@@ -195,7 +203,7 @@ function stateText(it) {
   if (it.status === "pending") return "Đang gửi…";
   if (it.status === "failed") return vi(it.error) || "Chưa gửi được";
   // Tin khôi phục từ HISTORY không có trường `n` (chỉ tin vừa gửi mới biết số người nhận).
-  if (it.to === "*") return it.n == null ? "Đã gửi" : (it.n === 0 ? "Chưa có ai online để nhận" : "Đã gửi tới " + it.n + " người");
+  if (it.to === "*") return it.n == null ? "Đã gửi" : (it.n === 0 ? "Đã lưu · người offline sẽ thấy khi đăng nhập" : "Đã gửi tới " + it.n + " người đang online");
   return "Đã gửi";
 }
 function fillMeta(it, meta) {
@@ -250,7 +258,8 @@ function patch(it) {
   ref.fill.style.width = pct + "%"; ref.name.textContent = it.name;
   let sub;
   if (it.status === "failed") sub = vi(it.error) || "Không gửi được";
-  else if (it.status === "done") sub = (it.mine ? "Đã gửi " : "Đã nhận ") + fmtSize(it.size);
+  else if (it.status === "queued") sub = it.mine ? "Sẽ gửi khi người nhận online" : "Đang chờ người gửi truyền file";
+  else if (it.status === "done") sub = (it.mine ? (it.to === "*" ? "Đã gửi vào nhóm " : "Đã gửi ") : "Đã nhận ") + fmtSize(it.size);
   else if (it.phase === "upload" && it.mine) sub = "Đang chuẩn bị… " + Math.round(pct) + "%";
   else {
     const sp = it._t && it._t.speed; let eta = "";
@@ -273,7 +282,7 @@ function patch(it) {
 function emptyState() {
   const d = el("div", "empty"), k = S.active;
   d.append(el("strong", "", k === "*" ? "Chưa có tin nhắn nào" : "Trò chuyện riêng với " + k),
-    document.createTextNode(k === "*" ? "Gửi lời chào để bắt đầu. Mọi người đang online đều nhận được." : "Tin nhắn ở đây chỉ gửi tới " + k + ". Bạn cũng có thể gửi file cho họ."));
+    document.createTextNode(k === "*" ? "Gửi lời chào hoặc thả file vào đây. Người đang offline vẫn nhận được khi đăng nhập lại." : "Tin nhắn và file ở đây chỉ gửi tới " + k + ", kể cả khi họ đang offline."));
   return d;
 }
 function renderLog(stick) {
@@ -337,9 +346,9 @@ function renderFiles() {
   $("tempty").classList.toggle("hidden", files.length > 0);
   $("tempty").textContent = "Chưa có tệp nào. Kéo thả file vào khung chat để gửi.";
   for (const f of files) {
-    const peer = f.mine ? f.to : f.from;
+    const peer = f.to === "*" ? "cả nhóm" : (f.mine ? f.to : f.from);
     const li = el("li"), mid = el("div");
-    mid.append(el("div", "t-name", f.name), el("div", "t-sub", (f.mine ? "Bạn gửi " + peer : f.from + " gửi bạn") + " · " + fmtSize(f.size) + (f.status === "failed" ? " · lỗi" : f.status === "active" ? " · đang truyền" : "")));
+    mid.append(el("div", "t-name", f.name), el("div", "t-sub", (f.mine ? "Bạn gửi " + peer : f.from + " gửi " + (f.to === "*" ? "cả nhóm" : "bạn")) + " · " + fmtSize(f.size) + (f.status === "failed" ? " · lỗi" : f.status === "queued" ? " · chờ gửi" : f.status === "active" ? " · đang truyền" : "")));
     li.append(el("div", "ficon", ext(f.name)), mid);
     if (f.status === "done" && !f.mine) { const a = el("a"); a.href = "/api/download/" + encodeURIComponent(f.name); a.download = f.name; a.title = "Tải về"; a.appendChild(icon("download")); li.appendChild(a); }
     ul.appendChild(li);
@@ -417,20 +426,8 @@ addEventListener("keydown", (e) => { if (e.key === "Escape") $("emoji").classLis
 function handleFiles(files) {
   files = [...files]; if (!files.length) return;
   if (!S.online) return toast("Chưa kết nối tới server.", "error");
-  const ppl = others();
-  if (S.active !== "*") {
-    if (!peerOf(S.active)) return toast(S.active + " đang offline nên chưa nhận được file.", "error");
-    return files.forEach((f) => uploadFile(f, S.active));
-  }
-  if (!ppl.length) return toast("Chưa có ai khác online để nhận file.", "error");
-  if (ppl.length === 1) return files.forEach((f) => uploadFile(f, ppl[0].user));
-  const dlg = $("picker"), list = $("pickerList"); list.replaceChildren();
-  $("pickerSub").textContent = files.length === 1 ? files[0].name : files.length + " file đã chọn. File chỉ gửi tới một người mỗi lần.";
-  for (const p of ppl) {
-    const b = el("button"); b.type = "button"; b.append(avatar(p.user, "sm"), document.createTextNode(p.user));
-    b.onclick = () => { dlg.close(); files.forEach((f) => uploadFile(f, p.user)); }; list.appendChild(b);
-  }
-  dlg.showModal();
+  const to = S.active;
+  files.forEach((f) => uploadFile(f, to));
 }
 function uploadFile(file, to) {
   if (!file.size) return toast(file.name + ": file rỗng.", "error");
@@ -462,7 +459,7 @@ $("attach").onclick = () => $("file").click();
 $("file").onchange = (e) => { handleFiles(e.target.files); e.target.value = ""; };
 let depth = 0;
 const hasFiles = (e) => e.dataTransfer && [...e.dataTransfer.types].includes("Files");
-addEventListener("dragenter", (e) => { if (!hasFiles(e) || $("app").classList.contains("hidden")) return; e.preventDefault(); depth++; $("dropSub").textContent = S.active === "*" ? "Bạn sẽ chọn người nhận" : "Gửi tới " + S.active; $("dropHint").classList.remove("hidden"); });
+addEventListener("dragenter", (e) => { if (!hasFiles(e) || $("app").classList.contains("hidden")) return; e.preventDefault(); depth++; $("dropSub").textContent = S.active === "*" ? "Gửi vào chat chung" : "Gửi tới " + S.active; $("dropHint").classList.remove("hidden"); });
 addEventListener("dragleave", () => { if (--depth <= 0) { depth = 0; $("dropHint").classList.add("hidden"); } });
 addEventListener("dragover", (e) => { if (hasFiles(e)) e.preventDefault(); });
 addEventListener("drop", (e) => { if (!hasFiles(e)) return; e.preventDefault(); depth = 0; $("dropHint").classList.add("hidden"); if (!$("app").classList.contains("hidden")) handleFiles(e.dataTransfer.files); });
@@ -483,8 +480,8 @@ function connectEvents() {
   /* Lịch sử cũ do server gửi lại sau khi đăng nhập: thêm vào hội thoại nhưng không báo "chưa đọc". */
   on("history", (d) => {
     let added = false;
-    for (const m of d.items || []) if (addItem({ type: "msg", ...m }).isNew) added = true;
-    if (added) { schedule("rail"); renderLog(false); }
+    for (const m of d.items || []) if (addItem(asItem(m)).isNew) added = true;
+    if (added) { schedule("rail"); schedule("panel"); renderLog(false); }
   });
   on("sent", (d) => {
     const f = findItem(d.ref); if (!f) return;
@@ -507,12 +504,13 @@ function connectEvents() {
   on("stats", (d) => showStats(d.stats));
   on("file_start", (d) => {
     const old = findItem(d.id);
-    if (old) { Object.assign(old.it, { phase: "net", size: d.size }); patch(old.it); return; }
+    if (old) { Object.assign(old.it, { phase: "net", size: d.size, status: old.it.status === "done" ? "done" : "active" }); patch(old.it); return; }
     const it = { type: "file", id: d.id, from: d.frm, to: d.to || S.user, name: d.name, size: d.size, ts: Date.now() / 1000, mine: d.dir === "up", status: "active", done: 0, phase: "net" };
     const r = addItem(it); notifyIncoming(convKey(it), it); showNew(r); schedule("rail"); schedule("panel");
   });
   on("file_progress", (d) => { const f = findItem(d.id); if (!f || f.it.status !== "active") return; f.it.done = d.done; f.it.phase = "net"; trackSpeed(f.it); patch(f.it); });
   on("file_sent", (d) => { const f = findItem(d.id); if (!f) return; Object.assign(f.it, { status: "done", done: d.size, xhr: null }); patch(f.it); schedule("panel"); schedule("rail"); });
+  on("file_queued", (d) => { const f = findItem(d.id); if (!f) return; Object.assign(f.it, { status: "queued", done: 0, xhr: null }); patch(f.it); schedule("panel"); schedule("rail"); });
   on("file_received", (d) => {
     const f = findItem(d.id); if (!f) return;
     Object.assign(f.it, { status: "done", done: d.size, name: d.name }); patch(f.it); schedule("panel"); schedule("rail");
