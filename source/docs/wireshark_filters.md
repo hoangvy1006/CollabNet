@@ -7,7 +7,8 @@ Mỗi mục là một "màn" riêng để trình bày tuần tự trước lớp
 
 | Thành phần | Giao thức / cổng | Ghi chú |
 |---|---|---|
-| Server CollabNet | UDP **9000** | bắt tay, AUTH, MSG, PEERS, HISTORY, ACK |
+| Server CollabNet | TCP **9000** | bắt tay TCP: HELLO → HELLO_ACK (rồi đóng) |
+| Server CollabNet | UDP **9000** | bắt tay mã hoá, AUTH, MSG, PEERS, HISTORY, ACK |
 | Beacon tìm server trong LAN | UDP **9998** | broadcast `255.255.255.255` |
 | P2P truyền file (client ↔ client) | UDP **cổng ngẫu nhiên** (bind `0.0.0.0:0`) | không đi qua server |
 | UI web của mỗi client | TCP **8080, 8081, 8082…** | HTTP thô + SSE `/api/events` |
@@ -28,13 +29,13 @@ payload[13..] : frame đã mã hoá (STREAM/ACK/PING/CLOSE…) + 16 byte GCM tag
 ## 1. Toàn cảnh buổi demo (mở đầu)
 
 ```
-udp.port == 9000 || udp.port == 9998 || (tcp.port >= 8080 && tcp.port <= 8099)
+udp.port == 9000 || udp.port == 9998 || tcp.port == 9000 || (tcp.port >= 8080 && tcp.port <= 8099)
 ```
 
 Bỏ nhiễu của máy (ARP, IPv6 neighbor discovery, DNS…):
 
 ```
-(udp.port == 9000 || udp.port == 9998 || (tcp.port >= 8080 && tcp.port <= 8099)) && !(arp || icmp || icmpv6 || dns)
+(udp.port == 9000 || udp.port == 9998 || tcp.port == 9000 || (tcp.port >= 8080 && tcp.port <= 8099)) && !(arp || icmp || icmpv6 || dns)
 ```
 
 ## 2. Bắt tay transport (X25519 + Ed25519) — Bước 2 của đề bài

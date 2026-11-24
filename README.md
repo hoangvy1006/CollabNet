@@ -19,6 +19,8 @@ pip install cryptography           # hoặc: pip install -r requirements.txt
 ```bash
 python -m server.server --port 9000
 ```
+Server mở **cùng số cổng trên cả TCP và UDP** (mặc định 9000): TCP cho bắt tay `HELLO → HELLO_ACK`,
+UDP cho mọi dữ liệu đã mã hoá — nếu có tường lửa, mở cả 9000/TCP lẫn 9000/UDP.
 Server in ra *fingerprint* khoá định danh Ed25519. Dữ liệu (users.json, history.json, khoá server) nằm trong `./server_data`.
 Tuỳ chọn: `--cc cubic|bbr`, `--host`, `--data-dir`, `--max-file-mb`, `--no-beacon`.
 
@@ -81,7 +83,7 @@ python -m client.main --ui-port 8080 --cc bbr --sim-loss 0.05 --sim-delay-ms 20
 
 ## 6. Kiểm thử tự động
 ```bash
-python -m unittest discover -s tests -t . -v        # 56 test (khoảng 1–2 phút trên Linux, lâu hơn trên Windows)
+python -m unittest discover -s tests -t . -v        # 62 test (khoảng 1–2 phút trên Linux, lâu hơn trên Windows)
 python docs/benchmark.py                            # CUBIC vs BBR
 python docs/build_report.py                         # sinh lại docs/report.pdf (cần reportlab, matplotlib)
 ```
@@ -90,7 +92,7 @@ python docs/build_report.py                         # sinh lại docs/report.pdf
 ```
 common/transport.py   Connection + Endpoint: stream, ACK/SACK, loss recovery, flow control, handshake
 common/congestion.py  CUBIC và BBR + pacing          common/crypto.py   X25519/Ed25519/HKDF/AES-GCM/PBKDF2
-common/packet.py      định dạng gói + frame          common/protocol.py thông điệp ứng dụng (JSON có độ dài)
+common/packet.py      định dạng gói + frame          common/protocol.py thông điệp ứng dụng (JSON có độ dài) + HELLO/HELLO_ACK trên TCP
 common/discovery.py   beacon broadcast / dò server   server/server.py   xác thực, presence, định tuyến, lịch sử chat
                       server/users.py   kho tài khoản (PBKDF2) + ghi file nguyên tử
                       server/history.py lịch sử hội thoại (history.json), gửi lại sau khi đăng nhập
@@ -104,7 +106,7 @@ client/web/           UI (index.html, app.js, style.css, fonts/)      tests/  do
 | Bước | Nội dung | Vị trí |
 |---|---|---|
 | 1 | Thiết kế giao thức, state diagram | `docs/report.pdf` mục 2, `common/packet.py`, `common/protocol.py` |
-| 2 | Handshake client-server + ACK | `Endpoint.connect/_on_initial` (INITIAL/HANDSHAKE), AUTH_OK |
+| 2 | Handshake client-server + ACK | **Socket TCP**: client `connect` → `HELLO` → server `HELLO_ACK` (`ClientCore._tcp_handshake`, `Server._tcp_hello`); sau đó bắt tay UDP mã hoá `Endpoint.connect/_on_initial` và AUTH_OK |
 | 3 | Xác thực & quản lý trạng thái (user, IP, port, cổng P2P) | `server/server.py` (`Session`, `PEERS`); lịch sử chat: `server/history.py` |
 | 4 | Đồng thời (async I/O) | asyncio + `add_reader` trên socket UDP thô; nhiều client cùng lúc |
 | 5 | Streaming nhạy thời gian: định tuyến tin nhắn | mỗi tin một stream, broadcast/unicast (`_route_msg`), chống HoL |
@@ -112,4 +114,4 @@ client/web/           UI (index.html, app.js, style.css, fonts/)      tests/  do
 | 7 | Chịu lỗi: timeout, ngắt kết nối, thoát êm | PTO/idle/keep-alive, auto-reconnect, CLOSE |
 | 8 | Mã hoá payload | AES-256-GCM từng gói, X25519 + chữ ký Ed25519 |
 | 9 | UI HTTP + JS phía client | `client/web`, tiến trình file, danh sách online |
-| 10 | Kiểm thử & chất lượng mã | `tests/` (56 test, gồm `test_regressions.py`, `test_review_fixes.py`), mô phỏng mất gói/trễ |
+| 10 | Kiểm thử & chất lượng mã | `tests/` (62 test, gồm `test_tcp_handshake.py`, `test_regressions.py`, `test_review_fixes.py`), mô phỏng mất gói/trễ |

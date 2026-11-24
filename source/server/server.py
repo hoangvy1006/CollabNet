@@ -2,7 +2,8 @@
 
 Chạy:  python -m server.server --port 9000
 
-server làm 4 việc chính trên một socket UDP duy nhất (asyncio, không thread):
+server làm các việc sau (asyncio, không thread). Trước tiên client bắt tay TCP (HELLO -> HELLO_ACK) cùng số cổng,
+sau đó mọi trao đổi đi trên một socket UDP duy nhất:
   1. Xác thực (AUTH) và đăng ký tài khoản mới ở lần đăng nhập đầu; mật khẩu lưu dạng PBKDF2 có muối.
   2. Theo dõi presence: ai đang online, IP/port và cổng + khoá P2P nào, phát danh sách PEERS khi có thay đổi.
   3. Định tuyến tin nhắn (broadcast "*" hoặc riêng tư), mỗi tin một stream nên không bị chặn bởi file lớn.
@@ -16,13 +17,15 @@ import argparse
 import asyncio
 import logging
 import os
+import socket
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common import crypto
 from common.discovery import Beacon
-from common.protocol import MAX_TEXT, USERNAME_RE, MsgBuffer, ProtocolError, pack, safe_filename
+from common.protocol import (MAX_TEXT, PROTO_VERSION, TCP_HELLO_TIMEOUT, USERNAME_RE, MsgBuffer, ProtocolError,
+                             pack, safe_filename)
 from common.transport import Endpoint
 from server.history import HistoryStore
 from server.users import UserStore
@@ -70,14 +73,79 @@ class Server:
         self.ep.on_accept = self._on_accept
         self.port = self.ep.addr[1]
         self.by_user: dict[str, Session] = {}
+        self.tcp = self._open_tcp(host, self.port)
+        self._tcp_task = loop.create_task(self._tcp_accept_loop())
         self.beacon = Beacon(loop, self.port, "CollabNet") if beacon else None
-        log.info("listening on UDP %s:%d, server key fingerprint %s", host, self.port, self.fingerprint)
+        log.info("listening on TCP+UDP %s:%d, server key fingerprint %s", host, self.port, self.fingerprint)
 
     def close(self):
+        self._tcp_task.cancel()
+        self.tcp.close()
         if self.beacon:
             self.beacon.close()
         self.history.close()
         self.ep.close()
+
+    # ------------------------------------------------------------ bắt tay TCP (bước 2 của đề)
+    @staticmethod
+    def _open_tcp(host, port):
+        """Socket TCP thô cùng số cổng với UDP: client kết nối, gửi HELLO và nhận HELLO_ACK trước khi dùng UDP."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if os.name != "nt":                          # trên Windows SO_REUSEADDR cho phép chiếm cổng của tiến trình khác
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+            sock.listen(64)
+        except OSError:
+            sock.close()
+            raise
+        sock.setblocking(False)
+        return sock
+
+    async def _tcp_accept_loop(self):
+        """Nhận kết nối TCP liên tục; mỗi kết nối được phục vụ bởi một task riêng nên không chặn nhau."""
+        while True:
+            try:
+                conn, addr = await self.loop.sock_accept(self.tcp)
+            except asyncio.CancelledError:
+                raise
+            except OSError:
+                if self.tcp.fileno() < 0:
+                    return                           # server đã đóng
+                await asyncio.sleep(0.05)            # lỗi tạm thời (hết file descriptor...): thử lại
+                continue
+            self.loop.create_task(self._tcp_hello(conn, addr))
+
+    async def _tcp_hello(self, conn, addr):
+        """HELLO -> HELLO_ACK. Báo cho client biết server sống, phiên bản giao thức, cổng UDP và fingerprint khoá.
+
+        Fingerprint ở đây chỉ để hiển thị/kiểm tra sớm; xác thực thật vẫn là chữ ký Ed25519 trong bắt tay UDP.
+        Mọi lỗi (timeout, ngắt giữa chừng, dữ liệu rác) chỉ đóng kết nối TCP đó, không ảnh hưởng server.
+        """
+        conn.setblocking(False)
+        try:
+            buf = MsgBuffer()
+
+            async def read_hello():
+                while (m := buf.pop()) is None:
+                    data = await self.loop.sock_recv(conn, 4096)
+                    if not data:
+                        raise ConnectionError("client closed before HELLO")
+                    buf.feed(data)
+                return m
+            m = await asyncio.wait_for(read_hello(), TCP_HELLO_TIMEOUT)
+            if m["t"] != "HELLO":
+                raise ProtocolError(f"expected HELLO, got {m['t']}")
+            if m.get("proto") != PROTO_VERSION:
+                await self.loop.sock_sendall(conn, pack({"t": "HELLO_FAIL", "msg": "unsupported protocol version"}))
+                return
+            await self.loop.sock_sendall(conn, pack({"t": "HELLO_ACK", "proto": PROTO_VERSION, "udp_port": self.port,
+                                                     "fp": self.fingerprint, "ts": time.time()}))
+            log.info("TCP handshake from %s:%d -> ACK", *addr)
+        except (OSError, ConnectionError, ProtocolError, asyncio.TimeoutError) as exc:
+            log.info("TCP handshake from %s:%d failed: %s", addr[0], addr[1], exc or type(exc).__name__)
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------ sessions
     def _on_accept(self, conn):
@@ -296,7 +364,8 @@ async def amain(args):
     loop = asyncio.get_running_loop()
     srv = Server(loop, args.host, args.port, args.data_dir, args.cc, args.sim_loss, args.sim_delay_ms / 1000,
                  args.max_file_mb, not args.no_beacon)
-    print(f"CollabNet server on UDP port {srv.port} | congestion control: {args.cc}")
+    print(f"CollabNet server on TCP+UDP port {srv.port} (TCP: HELLO/ACK, UDP: encrypted streams)"
+          f" | congestion control: {args.cc}")
     print(f"Server key fingerprint (clients pin this on first use): {srv.fingerprint}")
     try:
         await asyncio.Event().wait()

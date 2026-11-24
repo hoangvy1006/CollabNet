@@ -2,6 +2,11 @@
 
 Mỗi thông điệp ứng dụng là ``u32 độ dài`` + một object JSON UTF-8, bắt buộc có trường ``"t"`` (loại).
 
+Bước 0 — bắt tay TCP (trước mọi gói UDP), cùng số cổng với server nhưng là socket TCP:
+    client -> server : {"t":"HELLO","proto":1,"user":..}
+    server -> client : {"t":"HELLO_ACK","proto":1,"udp_port":..,"fp":<fingerprint Ed25519>,"ts":..}
+    rồi đóng TCP. Client dùng `udp_port` trong ACK để mở kết nối UDP mã hoá (INITIAL/HANDSHAKE) bên dưới.
+
 Cách dùng stream (chìa khoá để không bị head-of-line blocking):
     stream 0 của client : điều khiển (AUTH, LIST, BYE)                          sống lâu
     stream 1 của server : điều khiển (AUTH_OK/FAIL, PEERS, HISTORY, SENT, ERR)  sống lâu
@@ -20,6 +25,8 @@ MAX_MSG = 1 << 20                 # kích thước tối đa của MỘT thông 
 MAX_TEXT = 8192
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{2,24}$")
 DISCOVERY_PORT = 9998
+PROTO_VERSION = 1                 # phiên bản giao thức, kiểm tra trong bắt tay TCP HELLO / HELLO_ACK
+TCP_HELLO_TIMEOUT = 5.0           # giây: thời gian tối đa cho một lượt HELLO -> HELLO_ACK trên TCP
 
 
 class ProtocolError(Exception):

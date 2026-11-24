@@ -11,6 +11,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common.discovery import Beacon, discover
 from common.transport import Connection, Endpoint, SentPacket
 from tests import test_e2e as _e2e
 from tests.test_e2e import chunked
@@ -88,6 +89,18 @@ class RateSampleTests(unittest.IsolatedAsyncioTestCase):
             conn._terminate("test done")
         finally:
             ep.close()
+
+
+class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_discover_finds_local_beacon(self):
+        # Trước đây discover() ném AttributeError trên Python 3.10 (loop.sock_recvfrom chỉ có từ 3.11).
+        beacon = Beacon(asyncio.get_running_loop(), 12345, "test-server", interval=0.2)
+        try:
+            found = await discover(1.0)
+        finally:
+            beacon.close()
+        self.assertIn({"host": "127.0.0.1", "port": 12345, "name": "test-server"}, found)
 
 
 if __name__ == "__main__":

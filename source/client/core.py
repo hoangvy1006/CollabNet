@@ -17,7 +17,7 @@ import uuid
 
 from common import crypto
 from common.fsutil import atomic_write_json
-from common.protocol import MAX_TEXT, MsgBuffer, ProtocolError, pack, safe_filename
+from common.protocol import MAX_TEXT, PROTO_VERSION, TCP_HELLO_TIMEOUT, MsgBuffer, ProtocolError, pack, safe_filename
 from common.transport import Endpoint
 
 log = logging.getLogger("collabnet.client")
@@ -132,8 +132,16 @@ class ClientCore:
         host, port, user, password = self.creds
         self.status = "connecting"
         self.emit("status", status=self.status)
-        infos = await self.loop.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_DGRAM)
+        infos = await self.loop.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM)
         addr = infos[0][4]
+        try:
+            ack = await self._tcp_handshake(addr, user)
+        except BaseException:
+            self.status = "offline"
+            self.emit("status", status=self.status)
+            raise
+        addr = (addr[0], ack["udp_port"])           # cổng UDP do server báo trong ACK
+        self.emit("notice", level="info", text=f"TCP handshake OK: server ACK (UDP port {ack['udp_port']})")
         ep = Endpoint(self.loop, ("0.0.0.0", 0), cc=self.cc, sim_loss=self.sim_loss, sim_delay=self.sim_delay)
         try:
             conn = await ep.connect(addr, verify=self._verify_server(host, port))
@@ -171,6 +179,49 @@ class ClientCore:
         self._stats_on = True
         if self._stats_task is None or self._stats_task.done():
             self._stats_task = asyncio.ensure_future(self._stats_loop())
+
+    async def _tcp_handshake(self, addr, user):
+        """Bước 2 của đề: kết nối TCP tới server, gửi HELLO, chờ HELLO_ACK rồi đóng TCP.
+
+        Kiểm tra server có sống và cùng phiên bản giao thức trước khi mở kết nối UDP mã hoá.
+        Trả về thông điệp ACK (có `udp_port`, `fp`); lỗi -> ConnectionError có lý do rõ ràng.
+        """
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setblocking(False)
+        try:
+            async def exchange():
+                await self.loop.sock_connect(sock, addr)
+                await self.loop.sock_sendall(sock, pack({"t": "HELLO", "proto": PROTO_VERSION, "user": user}))
+                buf = MsgBuffer()
+                while (m := buf.pop()) is None:
+                    data = await self.loop.sock_recv(sock, 4096)
+                    if not data:
+                        raise EOFError
+                    buf.feed(data)
+                return m
+            try:
+                ack = await asyncio.wait_for(exchange(), TCP_HELLO_TIMEOUT)
+            except asyncio.TimeoutError:
+                raise ConnectionError("TCP handshake timeout: server did not acknowledge")
+            except EOFError:
+                raise ConnectionError("TCP handshake: server closed the connection before ACK")
+            except ProtocolError as exc:
+                raise ConnectionError(f"TCP handshake: bad reply ({exc})")
+            except OSError as exc:              # gồm cả ConnectionRefusedError / ConnectionResetError
+                raise ConnectionError(f"cannot reach server over TCP {addr[0]}:{addr[1]}: {exc.strerror or exc}")
+            if ack.get("t") != "HELLO_ACK":
+                raise ConnectionError(f"TCP handshake rejected: {ack.get('msg', ack.get('t'))}")
+            try:
+                udp_port = int(ack.get("udp_port"))
+            except (TypeError, ValueError):
+                udp_port = 0
+            if not 0 < udp_port < 65536:
+                raise ConnectionError("TCP handshake: invalid UDP port in ACK")
+            ack["udp_port"] = udp_port
+            log.info("TCP handshake with %s:%d acknowledged", *addr)
+            return ack
+        finally:
+            sock.close()
 
     def _abort_downloads(self):
         self._abort_rx(self.rx)

@@ -33,6 +33,23 @@ class Beacon:
         self.sock.close()
 
 
+async def _recvfrom(loop, sock, n=2048):
+    """`loop.sock_recvfrom` chỉ có từ Python 3.11; trên 3.10 dùng add_reader (SelectorEventLoop) để chờ gói."""
+    if hasattr(loop, "sock_recvfrom"):
+        return await loop.sock_recvfrom(sock, n)
+    while True:
+        try:
+            return sock.recvfrom(n)
+        except (BlockingIOError, InterruptedError):
+            pass
+        fut = loop.create_future()
+        loop.add_reader(sock.fileno(), lambda: fut.done() or fut.set_result(None))
+        try:
+            await fut
+        finally:
+            loop.remove_reader(sock.fileno())
+
+
 async def discover(timeout: float = 2.5):
     """Phía client: lắng nghe beacon; trả về [{"host","port","name"}].
 
@@ -59,7 +76,7 @@ async def discover(timeout: float = 2.5):
     try:
         while (remaining := deadline - loop.time()) > 0:
             try:
-                data, addr = await asyncio.wait_for(loop.sock_recvfrom(sock, 2048), remaining)
+                data, addr = await asyncio.wait_for(_recvfrom(loop, sock), remaining)
             except asyncio.TimeoutError:
                 break                             # hết thời gian chờ: trả về những gì đã thấy
             except OSError:

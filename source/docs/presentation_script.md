@@ -311,12 +311,18 @@ Khi bấm một gói `10`, phần thân sau 13 byte là các byte ngẫu nhiên,
 ## BƯỚC 2 — Basic Client-Server Handshake (1 điểm)
 
 > **Mục tiêu chấm điểm:** “Implement basic TCP socket connection where a client can connect to the
-> server and receive an acknowledgment.” — Đồ án dùng **UDP tự viết** thay cho TCP, nhưng vẫn có
-> bắt tay và ACK đầy đủ; khi trình bày nói rõ điều này.
+> server and receive an acknowledgment.” — Đồ án làm **đúng nguyên văn**: client mở **socket TCP**
+> tới server (cổng 9000/TCP), gửi `HELLO`, server trả `HELLO_ACK` (phiên bản giao thức, cổng UDP,
+> fingerprint khoá). Sau đó mới tới bắt tay UDP mã hoá bên dưới.
 
 ### 2.1. Lời thuyết trình (đọc gần như nguyên văn)
 
-> “Bước 2 là bắt tay. Client sinh một cặp khoá **X25519 tạm thời**, gửi gói `INITIAL` gồm connection
+> “Bước 2 là bắt tay, gồm hai tầng. **Tầng 1 là TCP**: client `connect()` một socket TCP tới cổng 9000
+> của server, gửi thông điệp `HELLO` (u32 độ dài + JSON, có số phiên bản giao thức). Server trả
+> `HELLO_ACK` gồm phiên bản, cổng UDP và fingerprint khoá server, rồi đóng TCP. Đây chính là
+> ‘client kết nối TCP và nhận acknowledgment’ của đề. Nếu server không chạy, client báo lỗi rõ ràng
+> ‘cannot reach server over TCP’ thay vì treo.
+> **Tầng 2 là UDP**, cho dữ liệu thời gian thực: client sinh một cặp khoá **X25519 tạm thời**, gửi gói `INITIAL` gồm connection
 > id và khoá công khai 32 byte. Server sinh khoá tạm của mình, rồi ký một **transcript** gồm khoá
 > client, khoá server và hai connection id bằng khoá **Ed25519** của server. Server trả gói
 > `HANDSHAKE` chứa connection id server, khoá công khai tạm, khoá công khai dài hạn và chữ ký 64 byte.
@@ -326,7 +332,7 @@ Khi bấm một gói `10`, phần thân sau 13 byte là các byte ngẫu nhiên,
 > Sau bắt tay, client gửi `AUTH` trên stream điều khiển số 0; server trả `AUTH_OK` kèm danh sách
 > peer. Đó là ‘acknowledgment’ của đồ án.”
 
-**Nếu chỉ có 30 giây:** “INITIAL → HANDSHAKE → kiểm tra chữ ký → HKDF ra hai khoá AES → AUTH →
+**Nếu chỉ có 30 giây:** “TCP connect → HELLO → HELLO_ACK; rồi UDP: INITIAL → HANDSHAKE → kiểm tra chữ ký → HKDF ra hai khoá AES → AUTH →
 AUTH_OK; các gói sau đều là DATA mã hoá.”
 
 ### 2.2. Demo trên web
@@ -340,7 +346,7 @@ AUTH_OK; các gói sau đều là DATA mã hoá.”
 
 Server ở cửa sổ console in ra:
 ```
-CollabNet server on UDP port 9000 | congestion control: cubic
+CollabNet server on TCP+UDP port 9000 (TCP: HELLO/ACK, UDP: encrypted streams) | congestion control: cubic
 Server key fingerprint (clients pin this on first use): xx:xx:...
 ```
 **Câu nói:** “Fingerprint này được client ghim lần đầu; nếu lần sau server đổi khoá, client từ chối
@@ -348,7 +354,15 @@ kết nối — đó là chống man-in-the-middle.”
 
 ### 2.3. Wireshark — bắt tay và ACK
 
-**Filter chính:**
+**Bắt tay TCP (HELLO / HELLO_ACK) — xem trước tiên:**
+```
+tcp.port == 9000
+```
+Thấy SYN → SYN-ACK → ACK của TCP, một gói dữ liệu client → server (`{"t":"HELLO",...}`), một gói
+server → client (`{"t":"HELLO_ACK",...}`), rồi FIN. Chuột phải → Follow → TCP Stream để đọc JSON.
+(HELLO không chứa mật khẩu; mật khẩu chỉ đi trong `AUTH` trên UDP đã mã hoá.)
+
+**Bắt tay UDP — filter chính:**
 
 ```
 udp.port == 9000 && (udp.payload[0] == 0x01 || udp.payload[0] == 0x02)
