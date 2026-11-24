@@ -1,18 +1,15 @@
 # CollabNet — Distributed Streaming-based Client-Server Collaboration Application
 
-Chat (broadcast + riêng), danh sách người dùng online, truyền file tin cậy, chạy trên **UDP thuần**
+Chat (broadcast + riêng), danh sách người dùng online, truyền file **P2P trực tiếp giữa hai client**, chạy trên **UDP thuần**
 với transport tự viết (đa stream kiểu QUIC, sliding window, ACK/SACK, retransmit chọn lọc, CUBIC/BBR)
 và mã hoá AES-256-GCM. UI là web (HTML + JavaScript phía client) phục vụ bởi một HTTP server tự viết.
-
-Mã nguồn nằm trong thư mục `source/`; mọi lệnh bên dưới chạy từ đó (`cd source`). Bản tài liệu chi tiết
-hơn nằm ở [`source/README.md`](source/README.md).
 
 ## 1. Yêu cầu
 * Python **3.10+** (đã thử 3.12), Windows / macOS / Linux
 * Một thư viện ngoài duy nhất: `cryptography` (AES-GCM, X25519, Ed25519)
 
 ```bash
-cd source
+cd source                          # MỌI lệnh trong README đều chạy từ thư mục source/
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install cryptography           # hoặc: pip install -r requirements.txt
@@ -22,7 +19,7 @@ pip install cryptography           # hoặc: pip install -r requirements.txt
 ```bash
 python -m server.server --port 9000
 ```
-Server in ra *fingerprint* khoá định danh Ed25519. Dữ liệu (users.json, khoá server) nằm trong `./server_data`.
+Server in ra *fingerprint* khoá định danh Ed25519. Dữ liệu (users.json, history.json, khoá server) nằm trong `./server_data`.
 Tuỳ chọn: `--cc cubic|bbr`, `--host`, `--data-dir`, `--max-file-mb`, `--no-beacon`.
 
 ## 3. Chạy client (mỗi người dùng một terminal)
@@ -38,10 +35,19 @@ Mỗi client lưu file nhận và khoá server đã ghim trong `./client_state_<
 
 Cách dùng UI:
 * Cột trái là danh sách cuộc trò chuyện: **Cả nhóm** (chat chung) và từng người (chat riêng). Mỗi cuộc có luồng tin nhắn riêng,
-  badge tin chưa đọc, bản nháp riêng. Người đã offline vẫn nhận được tin nhắn và file khi đăng nhập lại.
+  badge tin chưa đọc, bản nháp riêng. Người đã offline vẫn nhận được tin nhắn và file: server lưu hội thoại,
+  byte file nằm trong outbox của người gửi và được đẩy P2P khi họ đăng nhập lại.
+* Lịch sử tin nhắn và thẻ file do **server** lưu (`server_data/history.json`): đăng xuất hoặc tắt máy rồi đăng nhập lại
+  vẫn thấy chat chung lẫn chat riêng. Client không giữ lịch sử giữa các phiên — sau khi xác thực server gửi lại ngay (`HISTORY`).
+  Tài khoản mới chỉ nhận tin **chung** phát sinh từ thời điểm tài khoản được tạo (`server_data/first_seen.json`),
+  nên không thấy hội thoại chung diễn ra trước khi nó tồn tại.
+  File đã nhận nằm trong `downloads` và được ghi vào `received.json` để thẻ file khôi phục trỏ đúng file trên đĩa.
 * Enter để gửi, Shift+Enter xuống dòng; link tự động bấm được; tin gửi lỗi có nút **Gửi lại**; nhiều biểu tượng cảm xúc sẵn có.
-* Gửi file: nút 📎, kéo-thả hoặc dán ảnh (Ctrl+V), kể cả trong khung chat chung. Có thể chọn nhiều file.
+* Gửi file: nút 📎, kéo-thả hoặc dán ảnh (Ctrl+V), ở cả khung **Cả nhóm** lẫn chat riêng. Có thể chọn nhiều file.
   Thẻ file hiển thị phần trăm, tốc độ, thời gian còn lại, nút huỷ/gửi lại/tải về và xem trước ảnh.
+  **File đi thẳng từ máy người gửi sang máy người nhận (P2P)**: mỗi client mở một cổng UDP riêng và công bố
+  cổng + fingerprint khoá Ed25519 của mình qua server; người gửi kết nối trực tiếp và xác minh đúng khoá đó.
+  Server chỉ giới thiệu peer, **không** nhận hay chuyển tiếp byte của file.
 * Bảng bên phải: biểu đồ RTT, cwnd, gói mất theo thời gian thực (thuật toán CUBIC/BBR) và danh sách tệp của cuộc trò chuyện.
 * Giao diện sáng/tối (tự theo hệ thống, có nút đổi). Font Be Vietnam Pro được đóng gói sẵn trong `client/web/fonts` (giấy phép OFL),
   nên chạy tốt cả khi mạng LAN không có internet.
@@ -49,41 +55,61 @@ Cách dùng UI:
 > Lần đầu kết nối, client ghim (TOFU) fingerprint của server. Nếu khoá đổi, client **từ chối** kết nối (chống MITM).
 > Muốn tin khoá mới: xoá mục tương ứng trong `known_hosts.json`.
 
-## 4. Mô phỏng mạng xấu (kiểm thử)
+## 4. Đặt lại dữ liệu (reset)
+Xoá toàn bộ tài khoản và lịch sử chat để server trở về trạng thái như lần chạy đầu (dùng trước buổi kiểm thử):
+```bash
+python -m server.reset --dry-run      # xem trước sẽ xoá gì, không xoá thật
+python -m server.reset                # hỏi xác nhận rồi xoá users.json, first_seen.json, history.json
+python -m server.reset -y             # không hỏi xác nhận
+```
+Mặc định giữ nguyên `server_identity.key` (fingerprint server không đổi); thêm `--with-identity` nếu muốn đổi khoá
+(khi đó client phải xoá mục cũ trong `client_state_<port>/known_hosts.json`).
+
+Script **từ chối chạy** khi cổng UDP của server (`--port`, mặc định 9000) hoặc cổng UI của **bất kỳ client nào**
+còn bận: server đang chạy sẽ ghi đè lại file, còn client còn phiên sẽ tự đăng nhập lại và tạo lại tài khoản ngay
+sau khi reset. Phạm vi quét client mặc định là dải **8080–8099** (`--ui-ports`, nhận dải hoặc danh sách, vd
+`--ui-ports 8080-8090` hay `--ui-ports 8080,9090,9091`), **cộng thêm** mọi cổng có thư mục `client_state_<port>/`
+— nên client thứ 3, thứ 4... hay client chạy ở cổng lạ vẫn bị phát hiện. Tắt hết server + client rồi chạy lại,
+hoặc thêm `--force` nếu chắc chắn các cổng đó không thuộc CollabNet. `--data-dir` để trỏ tới thư mục dữ liệu khác
+`./server_data` (thư mục `client_state_*` được tìm cạnh thư mục dữ liệu đó).
+
+## 5. Mô phỏng mạng xấu (kiểm thử)
 ```bash
 python -m server.server --port 9000 --cc bbr --sim-loss 0.05 --sim-delay-ms 20
 python -m client.main --ui-port 8080 --cc bbr --sim-loss 0.05 --sim-delay-ms 20
 ```
 
-## 5. Kiểm thử tự động
+## 6. Kiểm thử tự động
 ```bash
-python -m unittest discover -s tests -t . -v        # 49 test (khoảng 1 phút trên Linux, lâu hơn trên Windows)
+python -m unittest discover -s tests -t . -v        # 56 test (khoảng 1–2 phút trên Linux, lâu hơn trên Windows)
 python docs/benchmark.py                            # CUBIC vs BBR
 python docs/build_report.py                         # sinh lại docs/report.pdf (cần reportlab, matplotlib)
 ```
 
-## 6. Cấu trúc mã nguồn
+## 7. Cấu trúc mã nguồn
 ```
 common/transport.py   Connection + Endpoint: stream, ACK/SACK, loss recovery, flow control, handshake
 common/congestion.py  CUBIC và BBR + pacing          common/crypto.py   X25519/Ed25519/HKDF/AES-GCM/PBKDF2
 common/packet.py      định dạng gói + frame          common/protocol.py thông điệp ứng dụng (JSON có độ dài)
-common/discovery.py   beacon broadcast / dò server   server/server.py   xác thực, presence, định tuyến, relay file
+common/discovery.py   beacon broadcast / dò server   server/server.py   xác thực, presence, định tuyến, lịch sử chat
                       server/users.py   kho tài khoản (PBKDF2) + ghi file nguyên tử
+                      server/history.py lịch sử hội thoại (history.json), gửi lại sau khi đăng nhập
+                      server/reset.py   xoá toàn bộ tài khoản + lịch sử (đặt lại server trước khi kiểm thử)
 common/fsutil.py      ghi file nguyên tử (users.json, known_hosts, khoá server)
 client/core.py        logic mạng phía client         client/gateway.py  HTTP/SSE server tự viết (raw TCP)
 client/web/           UI (index.html, app.js, style.css, fonts/)      tests/  docs/report.pdf
 ```
 
-## 7. Đối chiếu yêu cầu đề bài
+## 8. Đối chiếu yêu cầu đề bài
 | Bước | Nội dung | Vị trí |
 |---|---|---|
 | 1 | Thiết kế giao thức, state diagram | `docs/report.pdf` mục 2, `common/packet.py`, `common/protocol.py` |
 | 2 | Handshake client-server + ACK | `Endpoint.connect/_on_initial` (INITIAL/HANDSHAKE), AUTH_OK |
-| 3 | Xác thực & quản lý trạng thái (user, IP, port) | `server/server.py` (`Session`, `PEERS`) |
+| 3 | Xác thực & quản lý trạng thái (user, IP, port, cổng P2P) | `server/server.py` (`Session`, `PEERS`); lịch sử chat: `server/history.py` |
 | 4 | Đồng thời (async I/O) | asyncio + `add_reader` trên socket UDP thô; nhiều client cùng lúc |
 | 5 | Streaming nhạy thời gian: định tuyến tin nhắn | mỗi tin một stream, broadcast/unicast (`_route_msg`), chống HoL |
-| 6 | Truyền file tin cậy, chia chunk, ghép lại trên UDP | `SendStream/RecvStream`, `FILE/FILE_END` + SHA-256 |
+| 6 | Truyền file tin cậy P2P, chia chunk, ghép lại trên UDP | `client/core.py` (`_p2p_connect`), `SendStream/RecvStream`, `FILE/FILE_END` + SHA-256 |
 | 7 | Chịu lỗi: timeout, ngắt kết nối, thoát êm | PTO/idle/keep-alive, auto-reconnect, CLOSE |
 | 8 | Mã hoá payload | AES-256-GCM từng gói, X25519 + chữ ký Ed25519 |
 | 9 | UI HTTP + JS phía client | `client/web`, tiến trình file, danh sách online |
-| 10 | Kiểm thử & chất lượng mã | `tests/` (49 test, gồm `test_regressions.py`), mô phỏng mất gói/trễ |
+| 10 | Kiểm thử & chất lượng mã | `tests/` (56 test, gồm `test_regressions.py`, `test_review_fixes.py`), mô phỏng mất gói/trễ |

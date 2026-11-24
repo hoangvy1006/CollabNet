@@ -19,7 +19,7 @@ import urllib.parse
 from common.discovery import discover
 from common.protocol import MAX_TEXT, safe_filename
 
-from .core import AuthError
+from .core import FILE_ID_RE, AuthError
 
 log = logging.getLogger("collabnet.gateway")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -259,6 +259,8 @@ class Gateway:
         to = urllib.parse.unquote(headers.get("x-to", ""))
         name = safe_filename(urllib.parse.unquote(headers.get("x-filename", "file")))
         fid = headers.get("x-file-id") or None
+        if fid is not None and not FILE_ID_RE.match(fid):
+            raise HttpError(400, "invalid X-File-Id")
         # "*" là chat chung: core fan-out P2P tới từng người đang online và giữ outbox cho người offline.
         if not to:
             raise HttpError(400, "missing recipient")

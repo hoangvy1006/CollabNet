@@ -478,10 +478,15 @@ class Connection:
         del self.sent[p.pn]
         self.bytes_in_flight -= p.size
         self.delivered += p.size
+        # Khoảng đo = max(send_elapsed, ack_elapsed) (draft-cheng-iccrg-delivery-rate-estimation). ack_elapsed phải
+        # tính từ `p.delivered_time` (mốc lúc gói được gửi) TRƯỚC khi cập nhật `self.delivered_time`; nếu không nó
+        # luôn bằng 0 và BBR ước lượng BtlBw quá cao (gói gửi dồn -> send_elapsed ~ 0 -> tốc độ "vô hạn").
+        send_elapsed = p.time - p.first_sent
+        ack_elapsed = now - p.delivered_time
+        interval = max(send_elapsed, ack_elapsed, 1e-6)
+        sample = RateSample((self.delivered - p.delivered) / interval, p.delivered, p.app_limited)
         self.delivered_time = now
         self.first_sent_time = p.time
-        interval = max(p.time - p.first_sent, now - self.delivered_time, 1e-6)
-        sample = RateSample((self.delivered - p.delivered) / interval, p.delivered, p.app_limited)
         self.cc.on_ack(now, p.size, p.time, rtt, sample, self.bytes_in_flight, self.srtt)
         for f in p.frames:
             if f[0] == "S":

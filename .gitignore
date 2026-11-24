@@ -18,3 +18,5 @@ client_state*/
 **/graphify-out/.graphify_labels.json.sig
 **/graphify-out/.graphify_labels.pending.json
 **/graphify-out/cache/stat-index.json
+**/graphify-out/.rebuild.lock
+**/graphify-out/.graph.html.stale

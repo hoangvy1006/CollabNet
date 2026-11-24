@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import socket
 import time
 import uuid
@@ -20,6 +21,7 @@ from common.protocol import MAX_TEXT, MsgBuffer, ProtocolError, pack, safe_filen
 from common.transport import Endpoint
 
 log = logging.getLogger("collabnet.client")
+FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")   # fid dùng làm tên file trong outbox: không được chứa đường dẫn
 
 
 class AuthError(Exception):
@@ -171,7 +173,15 @@ class ClientCore:
             self._stats_task = asyncio.ensure_future(self._stats_loop())
 
     def _abort_downloads(self):
-        for st in self.rx.values():
+        self._abort_rx(self.rx)
+
+    def _abort_rx(self, rx, reason="connection lost"):
+        """Huỷ mọi file đang nhận dở trên một kết nối vừa đứt: đóng file, xoá `.part`, đánh dấu thất bại.
+
+        Trước đây kết nối P2P đứt giữa chừng chỉ bỏ trạng thái nhận: file handle bị rò, `.part` nằm lại
+        trong downloads và thẻ file kẹt ở "active" mãi mãi.
+        """
+        for st in list(rx.values()):
             fh = st.get("fh")
             if fh and not fh.closed:
                 fh.close()
@@ -181,7 +191,12 @@ class ClientCore:
                     os.remove(part + ".part")
                 except OSError:
                     pass
-        self.rx.clear()
+            item, hdr = st.get("item"), st.get("hdr") or {}
+            if item is not None and item.get("status") != "done":
+                text = f"File '{hdr.get('name', item.get('name'))}' was interrupted ({reason})"
+                self._fail(item["id"], text)
+                self.emit("error", ref=item["id"], text=text)
+        rx.clear()
 
     async def _abandon(self, ep, conn):
         """Huỷ kết nối dở dang của một lần `_connect` mà không ảnh hưởng tới kết nối của lần khác."""
@@ -306,7 +321,7 @@ class ClientCore:
     def _on_p2p_accept(self, conn):
         rx = self._p2p_rx[conn] = {}
         conn.on_stream_data = lambda c, sid, data, fin: self._on_p2p_data(c, rx, sid, data, fin)
-        conn.on_close = lambda c, reason: self._p2p_rx.pop(c, None)
+        conn.on_close = lambda c, reason: self._abort_rx(self._p2p_rx.pop(c, {}), reason)
 
     def _on_p2p_data(self, conn, rx, sid, data, fin):
         # Chỉ file đi trên kết nối P2P; dùng chung logic ghép file với luồng nhận từ server.
@@ -326,6 +341,8 @@ class ClientCore:
 
     def _close_p2p(self):
         self._drop_p2p_conns()
+        for rx in list(self._p2p_rx.values()):
+            self._abort_rx(rx, "logged out")
         self._p2p_rx.clear()
         if self._p2p_ep is not None:
             self._p2p_ep.close()
@@ -557,7 +574,7 @@ class ClientCore:
         if not isinstance(data, dict):
             return
         for fid, meta in data.items():
-            if not isinstance(meta, dict):
+            if not isinstance(meta, dict) or not FILE_ID_RE.match(str(fid)):
                 continue
             path = self._outbox_path(str(fid))
             if not os.path.isfile(path):
@@ -789,6 +806,8 @@ class ClientCore:
             raise ConnectionError("cannot send a file to yourself")
         if self.max_file and size > self.max_file:
             raise ConnectionError(f"invalid or too large file (limit {self.max_file // 2**20} MB)")
+        if fid is not None and not FILE_ID_RE.match(str(fid)):
+            raise ValueError("invalid file id")
         fid = fid or uuid.uuid4().hex[:12]
         item = {"id": fid, "from": self.user, "to": to, "name": name, "size": size, "ts": time.time(),
                 "mine": True, "status": "active", "done": 0, "dir": "up"}
@@ -805,9 +824,17 @@ class ClientCore:
         primary = None
         try:
             targets = self._online_targets(to)
-            primary = targets[0] if targets else None
-            if primary is not None:
-                conn = await self._p2p_connect(primary)
+            unreachable = None
+            if targets:
+                try:
+                    conn = await self._p2p_connect(targets[0])
+                    primary = targets[0]
+                except Exception as exc:
+                    # Người nhận đầu tiên không kết nối được: KHÔNG huỷ cả lượt gửi (trước đây cả nhóm mất file).
+                    # Vẫn spool ra outbox, đẩy cho những người còn lại; người này nhận sau khi xuất hiện lại.
+                    log.info("P2P connect to %s failed, spooling only: %s", targets[0], exc)
+                    unreachable, conn = targets[0], None
+            if conn is not None:
                 sid = conn.open_stream(1)
                 header = pack({"t": "FILE", "id": fid, "from": self.user, "to": to, "name": name, "size": size})
                 conn.send(sid, header)
@@ -845,7 +872,9 @@ class ClientCore:
             self._outbox[fid] = meta
             self._save_outbox_index()
             await self._announce_file(meta)
-            for user in targets[1:]:
+            for user in targets:
+                if user in (primary, unreachable):
+                    continue
                 try:
                     await self._p2p_push(user, meta, item)
                 except Exception as exc:

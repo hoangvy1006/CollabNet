@@ -1,23 +1,23 @@
-# Graph Report - source  (2026-11-18)
+# Graph Report - source  (2026-11-24)
 
 ## Corpus Check
-- 28 files · ~38,972 words
+- 32 files · ~82,670 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 10 file(s) not represented in the graph (top: .woff2 8, (none) 1, .css 1)
 
 ## Summary
-- 588 nodes · 1317 edges · 25 communities (14 shown, 11 thin omitted)
-- Extraction: 94% EXTRACTED · 6% INFERRED · 0% AMBIGUOUS · INFERRED: 81 edges (avg confidence: 0.89)
+- 789 nodes · 1636 edges · 38 communities (27 shown, 11 thin omitted)
+- Extraction: 94% EXTRACTED · 6% INFERRED · 0% AMBIGUOUS · INFERRED: 102 edges (avg confidence: 0.89)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `4acc62e6`
+- Built from commit: `6171cf2d`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
-- json
-- Pair
+- core.py
+- Bộ lọc Wireshark cho buổi demo CollabNet
 - Endpoint
 - Connection
 - ClientCore
@@ -25,104 +25,168 @@
 - Bbr
 - E2E
 - build_report.py
-- core.py
+- ServerFixture
 - Gateway
 - app.js
 - MsgBuffer
+- test_e2e.py
 - Server
 - RangeSet
-- server.py
-- test_regressions.py
+- 6.3. Wireshark — chứng minh file đi P2P, không qua server
+- 8.3. Wireshark — chứng minh nội dung đã mã hoá
 - SendStream
 - TransportTests
-- test_gateway.py
-- os
+- 0. TRƯỚC KHI VÀO PHÒNG THI
+- 9.3. Wireshark — giao diện HTTP + SSE
 - RecvStream
+- 5.3. Wireshark — định tuyến và bằng chứng offline
+- PHỤ LỤC B — Lệnh khởi động, reset, kiểm thử
+- KỊCH BẢN THUYẾT TRÌNH & DEMO — CollabNet
+- BƯỚC 1 — Setup & Protocol Design (1 điểm)
+- BƯỚC 2 — Basic Client-Server Handshake (1 điểm)
+- PHỤ LỤC C — Định dạng gói và frame (để trả lời câu hỏi sâu)
+- test_regressions.py
+- server.py
+- os
+- SentPacket
+- benchmark.py
 
 ## God Nodes (most connected - your core abstractions)
-1. `ClientCore` - 56 edges
-2. `Connection` - 45 edges
-3. `Endpoint` - 33 edges
-4. `Server` - 30 edges
+1. `ClientCore` - 73 edges
+2. `Connection` - 47 edges
+3. `Endpoint` - 37 edges
+4. `Server` - 32 edges
 5. `Gateway` - 24 edges
-6. `connectEvents()` - 20 edges
-7. `Pair` - 19 edges
-8. `RangeSet` - 16 edges
-9. `E2E` - 16 edges
-10. `pack()` - 15 edges
+6. `connectEvents()` - 21 edges
+7. `KỊCH BẢN THUYẾT TRÌNH & DEMO — CollabNet` - 20 edges
+8. `Pair` - 19 edges
+9. `pack()` - 17 edges
+10. `MsgBuffer` - 16 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `7. Đối chiếu yêu cầu đề bài` --references--> `Session`  [INFERRED]
-  README.md → server/server.py
-- `E2E` --uses--> `AuthError`  [INFERRED]
-  tests/test_e2e.py → client/core.py
-- `ReconnectTests` --uses--> `AuthError`  [INFERRED]
-  tests/test_regressions.py → client/core.py
-- `ReconnectTests` --uses--> `AuthRejected`  [INFERRED]
-  tests/test_regressions.py → client/core.py
-- `ClientCore` --uses--> `Endpoint`  [INFERRED]
-  client/core.py → common/transport.py
+- `4.1. Lời thuyết trình (đọc gần như nguyên văn)` --references--> `Connection`  [INFERRED]
+  docs/presentation_script.md → common/transport.py
+- `4.3. Wireshark — chứng minh nhiều client cùng lúc` --references--> `Endpoint`  [INFERRED]
+  docs/presentation_script.md → common/transport.py
+- `4.1. Lời thuyết trình (đọc gần như nguyên văn)` --references--> `Session`  [INFERRED]
+  docs/presentation_script.md → server/server.py
+- `7.1. Lời thuyết trình (đọc gần như nguyên văn)` --references--> `ProtocolError`  [INFERRED]
+  docs/presentation_script.md → common/protocol.py
+- `7.4. Câu hỏi giảng viên có thể hỏi` --references--> `ProtocolError`  [INFERRED]
+  docs/presentation_script.md → common/protocol.py
 
 ## Import Cycles
 - None detected.
 
-## Communities (25 total, 11 thin omitted)
+## Communities (38 total, 11 thin omitted)
 
-### Community 0 - "json"
-Cohesion: 0.18
-Nodes (3): atomic_write_json(), atomic_write_text(), FsUtilTests
+### Community 0 - "core.py"
+Cohesion: 0.14
+Nodes (4): AuthError, AuthRejected, discover(), safe_filename()
+
+### Community 1 - "Bộ lọc Wireshark cho buổi demo CollabNet"
+Cohesion: 0.12
+Nodes (15): 0. Bản đồ cổng của chương trình (dùng để đặt filter), 10. Coloring rules gợi ý (View → Coloring Rules), 11. Capture filter (ô "Capture filter", hoặc `tshark -f`), 12. Lệnh tshark theo từng "cảnh" demo (tuỳ chọn), 13. Lưu ý khi trình bày (rất nên nói trước lớp), 1. Toàn cảnh buổi demo (mở đầu), 2. Bắt tay transport (X25519 + Ed25519) — Bước 2 của đề bài, 3. Đăng nhập / đăng ký (+7 more)
 
 ### Community 2 - "Endpoint"
-Cohesion: 0.06
-Nodes (12): derive_keys(), hash_password(), load_or_create_identity(), new_ephemeral(), PacketCipher, public_bytes(), sign(), transcript() (+4 more)
+Cohesion: 0.05
+Nodes (20): verify(), derive_keys(), fingerprint(), hash_password(), load_or_create_identity(), new_ephemeral(), PacketCipher, public_bytes() (+12 more)
 
 ### Community 4 - "ClientCore"
-Cohesion: 0.06
-Nodes (9): ClientCore, verify(), progress(), check(), fingerprint(), pack(), ReconnectTests, ServerFixture (+1 more)
+Cohesion: 0.05
+Nodes (4): ClientCore, progress(), check(), pack()
 
 ### Community 5 - "transport.py"
-Cohesion: 0.18
-Nodes (7): decode_frames(), enc_ack(), enc_close(), enc_max_stream_data(), enc_ping(), enc_stream(), UnitTests
+Cohesion: 0.23
+Nodes (6): decode_frames(), enc_ack(), enc_close(), enc_max_stream_data(), enc_ping(), enc_stream()
 
 ### Community 6 - "Bbr"
 Cohesion: 0.08
 Nodes (6): Bbr, CongestionControl, Cubic, make_cc(), RateSample, BbrWindowedMaxTests
 
 ### Community 7 - "E2E"
-Cohesion: 0.10
-Nodes (5): chunked(), Collector, E2E, E2ELossy, FeatureTests
+Cohesion: 0.07
+Nodes (14): 10.1. Lời thuyết trình (đọc gần như nguyên văn), 10.2. Demo trên web và terminal, 10.3.1. Thống kê file capture, 10.3.2. Expert Information — kiểm tra lỗi gói, 10.3.3. So sánh capture sạch và capture mất gói, 10.3.4. Xuất file nộp kèm, 10.3.5. Bảng benchmark (đọc từ `docs/benchmark.json`), 10.3. Wireshark — số liệu để kết luận (+6 more)
 
 ### Community 8 - "build_report.py"
-Cohesion: 0.11
-Nodes (6): architecture(), arrow(), box(), build(), make_diagrams(), sequence()
+Cohesion: 0.07
+Nodes (14): build(), Doc, inline(), is_separator(), make_table(), parse(), split_table_row(), wrap_code() (+6 more)
+
+### Community 9 - "ServerFixture"
+Cohesion: 0.20
+Nodes (3): ReconnectTests, ServerFixture, ServerRobustnessTests
 
 ### Community 10 - "Gateway"
-Cohesion: 0.13
-Nodes (3): Gateway, HttpError, GatewayHardeningTests
+Cohesion: 0.09
+Nodes (7): Gateway, HttpError, amain(), GatewayTests, http(), jpost(), GatewayHardeningTests
 
 ### Community 11 - "app.js"
 Cohesion: 0.08
-Nodes (67): addItem(), api(), appendRow(), applyTheme(), autosize(), avatar(), buildFile(), buildRow() (+59 more)
+Nodes (68): addItem(), api(), appendRow(), applyTheme(), asItem(), autosize(), avatar(), buildFile() (+60 more)
 
 ### Community 12 - "MsgBuffer"
 Cohesion: 0.10
-Nodes (11): MsgBuffer, 1. Yêu cầu, 2. Chạy server (Terminal 1), 3. Chạy client (mỗi người dùng một terminal), 4. Mô phỏng mạng xấu (kiểm thử), 5. Kiểm thử tự động, 6. Cấu trúc mã nguồn, 7. Đối chiếu yêu cầu đề bài (+3 more)
+Nodes (12): MsgBuffer, 3.1. Lời thuyết trình (đọc gần như nguyên văn), 3.2. Demo trên web, 3.3.1. Bản rõ của thao tác đăng nhập (chỉ trên loopback), 3.3.2. AUTH đã mã hoá trên UDP, 3.3.3. Beacon tìm server trong LAN (bản rõ có chủ ý), 3.3.4. Presence khi có người ra/vào, 3.3. Wireshark — đăng nhập, presence, beacon (+4 more)
 
 ### Community 16 - "Server"
-Cohesion: 0.07
-Nodes (5): ProtocolError, HistoryStore, Server, UserStore, UserStoreTests
+Cohesion: 0.05
+Nodes (19): ProtocolError, 5.1. Lời thuyết trình (đọc gần như nguyên văn), 7.1. Lời thuyết trình (đọc gần như nguyên văn), 7.2.1. Tắt server rồi bật lại, 7.2.2. Đóng client đột ngột, 7.2.3. Mô phỏng mạng mất gói, 7.2. Demo trên web — mất server, tự kết nối lại, mất gói, 7.3.1. Khoảng trống packet number (+11 more)
 
-### Community 18 - "server.py"
-Cohesion: 0.23
-Nodes (4): amain(), main(), amain(), main()
+### Community 18 - "6.3. Wireshark — chứng minh file đi P2P, không qua server"
+Cohesion: 0.18
+Nodes (11): 6.1. Lời thuyết trình (đọc gần như nguyên văn), 6.2. Tạo file demo và demo gửi file, 6.3.1. Tìm luồng file P2P, 6.3.2. Chứng minh file **không** đi qua server, 6.3.3. Bắt tay P2P trước khi truyền, 6.3.4. Phía giao diện web (bản rõ trong máy), 6.3.5. Bằng chứng file gửi cho Bob offline, 6.3.6. Bảng ý nghĩa (+3 more)
 
-### Community 19 - "test_regressions.py"
-Cohesion: 0.16
-Nodes (3): AuthError, AuthRejected, ProtocolTests
+### Community 19 - "8.3. Wireshark — chứng minh nội dung đã mã hoá"
+Cohesion: 0.18
+Nodes (11): 8.1. Lời thuyết trình (đọc gần như nguyên văn), 8.2. Demo trên web, 8.3.1. Không đọc được chữ trong gói DATA, 8.3.2. Khoá công khai thì nhìn thấy — đó là chủ ý, 8.3.3. Tag xác thực 16 byte, 8.3.4. So sánh với HTTP nội bộ, 8.3.5. P2P cũng mã hoá và xác minh, 8.3.6. Bảng ý nghĩa (+3 more)
 
-### Community 22 - "test_gateway.py"
-Cohesion: 0.31
-Nodes (3): GatewayTests, http(), jpost()
+### Community 21 - "TransportTests"
+Cohesion: 0.14
+Nodes (3): TransportInternalsTests, Pair, TransportTests
+
+### Community 22 - "0. TRƯỚC KHI VÀO PHÒNG THI"
+Cohesion: 0.20
+Nodes (10): 0.1. Cần có trên máy, 0.2. Sơ đồ cổng — thuộc lòng 4 dòng này, 0.3. Khởi động trong 5 lệnh (cách nhanh nhất), 0.4. Đăng nhập 3 người dùng (làm một lần, dùng cho cả buổi), 0.5. Bố cục màn hình khi trình bày, 0.6. Cách đọc một gói CollabNet (13 byte header) — hiểu một lần, dùng cả buổi, 0.7. Sáu thao tác Wireshark dùng đi dùng lại, 0.8. Lịch trình 18 phút (+2 more)
+
+### Community 23 - "9.3. Wireshark — giao diện HTTP + SSE"
+Cohesion: 0.20
+Nodes (10): 9.1. Lời thuyết trình (đọc gần như nguyên văn), 9.2. Demo trên web — các thành phần giao diện, 9.3.1. Bật giải mã HTTP cho cổng 8081/8082, 9.3.2. Danh sách request của giao diện, 9.3.3. SSE — kênh đẩy sự kiện thời gian thực, 9.3.4. TCP handshake và đặc điểm `Connection: close`, 9.3.5. Header bảo mật và upload, 9.3. Wireshark — giao diện HTTP + SSE (+2 more)
+
+### Community 25 - "5.3. Wireshark — định tuyến và bằng chứng offline"
+Cohesion: 0.25
+Nodes (8): 5.2. Demo trên web — chat chung, chat riêng, offline, 5.3.1. Mỗi tin nhắn là một request UI riêng, 5.3.2. Chiều client → server và server → client, 5.3.3. Bằng chứng mạnh nhất: Bob offline thì **không có gói nào** tới Bob, 5.3.4. Bảng ý nghĩa, 5.3. Wireshark — định tuyến và bằng chứng offline, 5.4. Câu hỏi giảng viên có thể hỏi, BƯỚC 5 — Time-sensitive Streaming & Message Routing (1 điểm)
+
+### Community 26 - "PHỤ LỤC B — Lệnh khởi động, reset, kiểm thử"
+Cohesion: 0.25
+Nodes (8): B.1. Vào thư mục và kiểm tra môi trường, B.2. Reset dữ liệu (làm khi server + client đã tắt), B.3. Chạy server, B.4. Chạy 3 client, B.5. Kiểm thử và benchmark, B.6. Tạo file demo và kiểm tra hash, B.7. Tắt sạch, PHỤ LỤC B — Lệnh khởi động, reset, kiểm thử
+
+### Community 27 - "KỊCH BẢN THUYẾT TRÌNH & DEMO — CollabNet"
+Cohesion: 0.29
+Nodes (6): KẾT BÀI (đọc nguyên văn), KỊCH BẢN THUYẾT TRÌNH & DEMO — CollabNet, PHỤ LỤC A — Bảng filter copy-paste, PHỤ LỤC E — Xử lý sự cố khi demo, PHỤ LỤC F — Từ điển nhanh cho người mới, PHỤ LỤC G — Ba câu chốt nếu giảng viên chỉ hỏi “tóm tắt đồ án”
+
+### Community 28 - "BƯỚC 1 — Setup & Protocol Design (1 điểm)"
+Cohesion: 0.40
+Nodes (5): 1.1. Lời thuyết trình (đọc gần như nguyên văn), 1.2. Demo trên web, 1.3. Wireshark — chứng minh cấu trúc gói, 1.4. Câu hỏi giảng viên có thể hỏi, BƯỚC 1 — Setup & Protocol Design (1 điểm)
+
+### Community 29 - "BƯỚC 2 — Basic Client-Server Handshake (1 điểm)"
+Cohesion: 0.40
+Nodes (5): 2.1. Lời thuyết trình (đọc gần như nguyên văn), 2.2. Demo trên web, 2.3. Wireshark — bắt tay và ACK, 2.4. Câu hỏi giảng viên có thể hỏi, BƯỚC 2 — Basic Client-Server Handshake (1 điểm)
+
+### Community 30 - "PHỤ LỤC C — Định dạng gói và frame (để trả lời câu hỏi sâu)"
+Cohesion: 0.40
+Nodes (5): C.1. Header 13 byte, C.2. Frame bên trong payload, C.3. Quy ước stream, C.4. Kích thước gói điển hình, PHỤ LỤC C — Định dạng gói và frame (để trả lời câu hỏi sâu)
+
+### Community 32 - "test_regressions.py"
+Cohesion: 0.14
+Nodes (4): atomic_write_json(), atomic_write_text(), FsUtilTests, ProtocolTests
+
+### Community 33 - "server.py"
+Cohesion: 0.19
+Nodes (3): main(), amain(), main()
+
+### Community 34 - "os"
+Cohesion: 0.19
+Nodes (6): _client_state_ports(), _counts(), _load_json(), main(), _parse_ports(), _port_busy()
 
 ## Knowledge Gaps
 - **11 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
@@ -130,17 +194,17 @@ Nodes (3): GatewayTests, http(), jpost()
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `ClientCore` connect `ClientCore` to `Endpoint`, `E2E`, `core.py`, `Gateway`, `MsgBuffer`, `server.py`, `test_regressions.py`, `test_gateway.py`?**
-  _High betweenness centrality (0.138) - this node is a cross-community bridge._
+- **Why does `ClientCore` connect `ClientCore` to `core.py`, `server.py`, `Endpoint`, `test_regressions.py`, `E2E`, `ServerFixture`, `Gateway`, `test_e2e.py`?**
+  _High betweenness centrality (0.155) - this node is a cross-community bridge._
 - **Are the 5 inferred relationships involving `ClientCore` (e.g. with `Endpoint` and `E2E`) actually correct?**
   _`ClientCore` has 5 INFERRED edges - model-reasoned connections that need verification._
-- **Should `Endpoint` be split into smaller, more focused modules?**
-  _Cohesion score 0.05889724310776942 - nodes in this community are weakly interconnected._
-- **Why does `Endpoint` connect `Endpoint` to `Pair`, `ClientCore`, `transport.py`, `E2E`, `core.py`, `Server`, `server.py`, `test_regressions.py`, `TransportTests`?**
-  _High betweenness centrality (0.111) - this node is a cross-community bridge._
-- **Are the 2 inferred relationships involving `Connection` (e.g. with `RateSample` and `RangeSet`) actually correct?**
+- **Should `core.py` be split into smaller, more focused modules?**
+  _Cohesion score 0.1422924901185771 - nodes in this community are weakly interconnected._
+- **Why does `KỊCH BẢN THUYẾT TRÌNH & DEMO — CollabNet` connect `KỊCH BẢN THUYẾT TRÌNH & DEMO — CollabNet` to `Endpoint`, `E2E`, `MsgBuffer`, `Server`, `6.3. Wireshark — chứng minh file đi P2P, không qua server`, `8.3. Wireshark — chứng minh nội dung đã mã hoá`, `0. TRƯỚC KHI VÀO PHÒNG THI`, `9.3. Wireshark — giao diện HTTP + SSE`, `5.3. Wireshark — định tuyến và bằng chứng offline`, `PHỤ LỤC B — Lệnh khởi động, reset, kiểm thử`, `BƯỚC 1 — Setup & Protocol Design (1 điểm)`, `BƯỚC 2 — Basic Client-Server Handshake (1 điểm)`, `PHỤ LỤC C — Định dạng gói và frame (để trả lời câu hỏi sâu)`?**
+  _High betweenness centrality (0.153) - this node is a cross-community bridge._
+- **Are the 2 inferred relationships involving `Connection` (e.g. with `4.1. Lời thuyết trình (đọc gần như nguyên văn)` and `RateSampleTests`) actually correct?**
   _`Connection` has 2 INFERRED edges - model-reasoned connections that need verification._
-- **Should `Connection` be split into smaller, more focused modules?**
-  _Cohesion score 0.08771929824561403 - nodes in this community are weakly interconnected._
-- **Why does `Connection` connect `Connection` to `Endpoint`, `transport.py`, `Bbr`, `RangeSet`, `SendStream`?**
-  _High betweenness centrality (0.110) - this node is a cross-community bridge._
+- **Should `Bộ lọc Wireshark cho buổi demo CollabNet` be split into smaller, more focused modules?**
+  _Cohesion score 0.125 - nodes in this community are weakly interconnected._
+- **Why does `Endpoint` connect `Endpoint` to `core.py`, `server.py`, `test_regressions.py`, `Connection`, `ClientCore`, `transport.py`, `SentPacket`, `E2E`, `ServerFixture`, `test_e2e.py`, `TransportTests`?**
+  _High betweenness centrality (0.126) - this node is a cross-community bridge._
