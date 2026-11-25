@@ -34,7 +34,7 @@ FD = "/usr/share/fonts/truetype/dejavu/"
 WIN = "C:/Windows/Fonts/"
 REG = _first([FD + "DejaVuSans.ttf", WIN + "segoeui.ttf", WIN + "arial.ttf"])
 BOLD = _first([FD + "DejaVuSans-Bold.ttf", WIN + "segoeuib.ttf", WIN + "seguisb.ttf", WIN + "arialbd.ttf"])
-MONO = _first([FD + "DejaVuSansMono.ttf", WIN + "consola.ttf", WIN + "cour.ttf"])
+MONO = _first(["/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf", FD + "DejaVuSansMono.ttf", WIN + "consola.ttf", WIN + "cour.ttf"])
 pdfmetrics.registerFont(TTFont("DV", REG))
 pdfmetrics.registerFont(TTFont("DV-B", BOLD))
 pdfmetrics.registerFont(TTFont("DVM", MONO))
@@ -73,6 +73,7 @@ def architecture():
     arrow(ax, 8.1, 3.9, 8.1, 3.4)
     arrow(ax, 8.1, 2.3, 8.1, 1.9)
     arrow(ax, 5.5, 1.3, 6.6, 1.3, "UDP\n(mã hoá)", color="#8a4fff")
+    arrow(ax, 5.5, 2.85, 6.6, 2.85, "TCP\nHELLO/ACK", both=False, color="#e0a100")
     ax.text(5.5, 0.15, "Nhiều stream độc lập trong 1 kết nối UDP: ctrl · mỗi tin nhắn 1 stream · mỗi file 1 stream (P2P: client ↔ client)",
             ha="center", fontsize=8.5, style="italic")
     ax.plot([5.8, 5.8], [2.0, 5.2], ls=":", c="#bbb")
@@ -175,13 +176,14 @@ def build():
           P("Môn: Network Application Development · Assignment 1", sub), Spacer(1, 1.2 * cm),
           P("Hệ thống chat, phát hiện người dùng và truyền file thời gian thực chạy trên <b>UDP thuần</b>, "
             "với transport tin cậy tự xây dựng (đa stream, sliding window, ACK/SACK, retransmit chọn lọc, CUBIC/BBR) "
-            "và mã hoá AES-256-GCM. Giao diện web bằng HTTP + JavaScript phía client.", base),
+            "và mã hoá AES-256-GCM. Trước khi dùng UDP, client <b>bắt tay TCP</b> với server (HELLO → HELLO_ACK) cùng số cổng. "
+            "Giao diện web bằng HTTP + JavaScript phía client.", base),
           Spacer(1, 0.8 * cm)]
     S.append(table([["Hạng mục", "Nội dung"],
                     ["Ngôn ngữ / thư viện", "Python 3.10+; chỉ dùng <b>socket</b> thô + asyncio; 1 thư viện ngoài: <i>cryptography</i> (AES-GCM, X25519, Ed25519, HKDF)"],
                     ["Không dùng", "Flask/Django, WebSocket, QUIC/aioquic, thư viện mạng cấp cao"],
-                    ["Giao thức", "Tầng ứng dụng + transport tự thiết kế (xem mục 2); file đi P2P (xem mục 2.3, 5.11)"],
-                    ["Kiểm thử", "51 kiểm thử tự động (unit, transport, e2e, gateway, hồi quy) + thử trình duyệt thật bằng Chromium"],
+                    ["Giao thức", "Bắt tay TCP HELLO/ACK (mục 2.0) rồi tầng ứng dụng + transport tự thiết kế trên UDP (xem mục 2); file đi P2P (xem mục 2.3, 5.11)"],
+                    ["Kiểm thử", "62 kiểm thử tự động (unit, transport, e2e, gateway, bắt tay TCP, hồi quy) + thử trình duyệt thật bằng Chromium"],
                     ["Nội dung báo cáo", "Kiến trúc · giao thức · sơ đồ tuần tự · giao diện và kết quả đo · các module chính kèm đoạn mã tiêu biểu · thách thức"]],
                    [4.2 * cm, 12.8 * cm]))
     S.append(PageBreak())
@@ -190,12 +192,14 @@ def build():
     S += [P("1. Kiến trúc hệ thống", h1),
           P("Hệ thống tách bạch ba lớp: <b>logic mạng</b> (common/transport.py, client/core.py, server/server.py), "
             "<b>xử lý dữ liệu</b> (protocol.py, crypto.py) và <b>giao diện</b> (client/web: HTML + JS thuần). "
-            "Trình duyệt chỉ nói chuyện HTTP với gateway cục bộ; mọi giao tiếp giữa các máy đều là UDP. "
+            "Trình duyệt chỉ nói chuyện HTTP với gateway cục bộ. Giữa các máy: client mở <b>kết nối TCP</b> tới server để bắt tay "
+            "(HELLO → HELLO_ACK, nhận xác nhận và cổng UDP), sau đó toàn bộ dữ liệu (đăng nhập, chat, presence, file P2P) đi trên <b>UDP</b> mã hoá. "
             "Server còn giữ tài khoản (server/users.py) và lịch sử chat (server/history.py); file đi trực tiếp "
             "giữa hai client (P2P). Mục 5 trích đoạn mã quyết định của từng file.", base),
-          Spacer(1, 6), img("arch.png", 16.5),
+          Spacer(1, 6), img("arch.png", 12),
           P("Quyết định thiết kế chính", h2)]
     S.append(table([["Vấn đề", "Giải pháp", "Liên hệ lý thuyết (giáo trình)"],
+                    ["Kết nối + xác nhận (bước 2 của đề)", "Client kết nối TCP tới server (cùng cổng với UDP), gửi HELLO; server trả HELLO_ACK {udp_port, fp} rồi đóng TCP (mục 2.0)", "Ch.3: TCP 3-way handshake, socket API"],
                     ["Tin cậy trên UDP", "Số hiệu gói tăng đơn điệu (mỗi lần gửi lại dùng số mới), ACK dạng dải (SACK), "
                      "phát hiện mất gói bằng ngưỡng 3 gói + ngưỡng thời gian 9/8 RTT + PTO", "Ch.3: rdt, Go-Back-N / Selective Repeat, TCP RTT"],
                     ["Không bị Head-of-Line blocking", "Mỗi tin nhắn / mỗi file là một <b>stream</b> riêng; chỉ byte trong cùng stream mới phải đúng thứ tự", "Ch.2: HTTP/2→HTTP/3, QUIC"],
@@ -211,7 +215,19 @@ def build():
     S.append(PageBreak())
 
     # 2. Giao thức
-    S += [P("2. Đặc tả giao thức", h1), P("2.1 Datagram (tầng transport)", h2),
+    S += [P("2. Đặc tả giao thức", h1), P("2.0 Bắt tay TCP (kết nối + xác nhận)", h2),
+          P("Server mở socket TCP và UDP <b>cùng số cổng</b> (mặc định 9000). Khi đăng nhập, client làm bước này trước tiên; "
+            "nếu không kết nối được TCP, client báo lỗi rõ ràng <i>cannot reach server over TCP</i> và không thử UDP.", base),
+          Spacer(1, 3)]
+    S.append(table([["Bước", "Gói tin", "Nội dung"],
+                    ["1", "TCP SYN → SYN/ACK → ACK", "Bắt tay 3 bước của hệ điều hành (socket.connect)"],
+                    ["2", "C→S: HELLO", "u32 + JSON {t:HELLO, proto:1, user}"],
+                    ["3", "S→C: HELLO_ACK", "{t:HELLO_ACK, proto, udp_port, fp (fingerprint Ed25519), ts}; sai phiên bản → HELLO_FAIL"],
+                    ["4", "FIN", "Đóng TCP; client chuyển sang INITIAL/HANDSHAKE trên UDP (mục 2.1, 2.4)"]],
+                   [1.4 * cm, 4.6 * cm, 11.0 * cm]))
+    S += [Spacer(1, 3), P("HELLO không chứa mật khẩu (mật khẩu chỉ đi trong AUTH đã mã hoá AES-GCM trên UDP); "
+                          "fp trong HELLO_ACK được client đối chiếu với khoá ghim (TOFU) khi bắt tay UDP.", base),
+          P("2.1 Datagram (tầng transport)", h2),
           Preformatted("+------+-----------+------------------+-------------------------------+---------+\n"
                        "| type | dest_cid  |   packet number  |  frames, mã hoá AES-256-GCM   | GCM tag |\n"
                        "| 1 B  |   4 B     |       8 B        |          (<= 1171 B)          |  16 B   |\n"
@@ -243,6 +259,8 @@ def build():
                    [2.8 * cm, 5.6 * cm, 1.6 * cm, 7.0 * cm]))
     S += [P("2.4 Máy trạng thái kết nối", h2),
           Preformatted("  CLIENT                                             SERVER\n"
+                       "  TCP_HELLO  --[TCP] HELLO{proto,user}--------------> kiểm tra phiên bản\n"
+                       "             <-[TCP] HELLO_ACK{udp_port,fp}---------- (đóng TCP)\n"
                        "  CONNECTING --INITIAL(cid,epk)--------------------> (tạo Connection, cache reply)\n"
                        "             <-HANDSHAKE(cid',epk',pk,sig)--------- \n"
                        "  (verify sig + pin) --> ESTABLISHED <-- keys (HKDF) --> ESTABLISHED\n"
@@ -295,7 +313,7 @@ def build():
           Preformatted(r"""source/
 |-- common/                 giao thức, transport, mã hoá dùng chung cho client + server
 |   |-- packet.py           khuôn dạng datagram + frame: enc_*, decode_frames (5.1)
-|   |-- protocol.py         thông điệp JSON tiền tố u32 + MsgBuffer, hằng số dùng chung
+|   |-- protocol.py         thông điệp JSON tiền tố u32 + MsgBuffer, PROTO_VERSION, hằng số
 |   |-- crypto.py           X25519 -> HKDF -> AES-256-GCM, Ed25519 ký bắt tay, PBKDF2 (5.3)
 |   |-- transport.py        Connection/Endpoint: stream, ACK/SACK, mất gói, flow-control (5.5)
 |   |-- congestion.py       CUBIC + BBR + RateSample (5.4)
@@ -303,15 +321,15 @@ def build():
 |   |-- discovery.py        beacon của server + dò server trong LAN (5.6)
 |   `-- fsutil.py           ghi file nguyên tử, quyền 0600 (5.7)
 |-- client/
-|   |-- core.py             ClientCore: đăng nhập, reconnect, P2P file, lịch sử, sự kiện (5.11)
+|   |-- core.py             ClientCore: bắt tay TCP, đăng nhập, reconnect, P2P file, sự kiện (5.11)
 |   |-- gateway.py          HTTP/1.1: UI tĩnh, API JSON, SSE, upload/download (5.12)
 |   |-- main.py             argparse + dựng event loop cho client và gateway
 |   `-- web/                UI thuần JS: index.html · app.js (5.13) · style.css · fonts/
 |-- server/
-|   |-- server.py           Server/Session: AUTH, presence, định tuyến MSG, beacon (5.10)
+|   |-- server.py           Server/Session: TCP HELLO/ACK, AUTH, presence, định tuyến MSG (5.10a-b)
 |   |-- users.py            UserStore: PBKDF2, first_seen.json (5.8)
 |   `-- history.py          HistoryStore: history.json, debounce, for_user(since) (5.9)
-|-- tests/                  5 file: transport · e2e · gateway · features · regressions (5.14)
+|-- tests/                  7 file: transport · e2e · gateway · features · regressions · ... (5.14)
 `-- docs/                   build_report.py (sinh report.pdf) · benchmark.py · ảnh PNG""", code_s), Spacer(1, 6)]
 
     walk = [
@@ -503,7 +521,23 @@ def for_user(self, user: str, since: float = 0.0) -> list[dict]:
           "for_user trả tin chung + tin của mình + tin riêng cho mình, cũ nhất trước; since là mốc tạo tài khoản nên "
           "tài khoản mới không thấy hội thoại đã diễn ra trước khi nó tồn tại.",
           "Giới hạn 300 tin / 512 KB mỗi lần phát lại để HISTORY luôn nằm dưới giới hạn 1 MB của một thông điệp."]),
-        ("5.10 server/server.py — định tuyến tin nhắn",
+        ("5.10a server/server.py — bắt tay TCP (HELLO → HELLO_ACK)",
+         "Socket TCP thô cùng số cổng với UDP; mỗi kết nối được xử lý bằng một task riêng rồi đóng ngay.",
+         r'''m = await asyncio.wait_for(read_hello(), TCP_HELLO_TIMEOUT)   # 5 s
+if m["t"] != "HELLO":
+    raise ProtocolError(f"expected HELLO, got {m['t']}")
+if m.get("proto") != PROTO_VERSION:
+    await self.loop.sock_sendall(conn, pack({"t": "HELLO_FAIL", "msg": "unsupported protocol version"}))
+    return
+await self.loop.sock_sendall(conn, pack({"t": "HELLO_ACK", "proto": PROTO_VERSION,
+                                         "udp_port": self.port, "fp": self.fingerprint, "ts": time.time()}))
+...
+finally:
+    conn.close()                              # TCP chỉ dùng cho bước xác nhận''',
+         ["Lỗi (timeout, ngắt giữa chừng, dữ liệu rác) chỉ đóng kết nối TCP đó, không ảnh hưởng server.",
+          "Phía client (_tcp_handshake trong core.py) gửi HELLO, chờ HELLO_ACK, kiểm tra udp_port rồi mới gọi Endpoint.connect trên UDP.",
+          "fp chỉ để kiểm tra sớm; xác thực thật vẫn là chữ ký Ed25519 trong bắt tay UDP."]),
+        ("5.10b server/server.py — định tuyến tin nhắn",
          "Router: presence, chuyển tin, ghi lịch sử. Server KHÔNG nhận nội dung file.",
          r'''if hdr["t"] == "MSG":
     st.kind = "msg"
@@ -586,14 +620,16 @@ fid = await self.core.send_file(to, name, size, body(), fid)''',
         S.append(Spacer(1, 7))
 
     S += [P("5.14 Bộ kiểm thử", h3),
-          P("51 kiểm thử chia theo lớp, chạy bằng <i>python -m unittest discover -s tests -t .</i> (khoảng 2 phút):", base),
+          P("62 kiểm thử chia theo lớp, chạy bằng <i>python -m unittest discover -s tests -t .</i> (khoảng 2 phút):", base),
           Spacer(1, 3)]
     S.append(table([["File", "Nội dung kiểm tra"],
                     ["tests/test_transport.py", "RangeSet, mã hoá/giải mã frame, crypto; 4 MB sạch; 5% mất gói + reorder (CUBIC, BBR); flow-control; chống HoL"],
                     ["tests/test_e2e.py", "3 client thật trên loopback: login, presence, broadcast/unicast, file 3 MB qua P2P + file rỗng, mất kết nối đột ngột, biến thể 4% mất gói + 15 ms"],
                     ["tests/test_gateway.py", "HTTP thô: UI, login, chat, upload/download, SSE, thiếu X-Requested-With, Host lạ, path traversal"],
                     ["tests/test_features.py", "Trạng thái gửi, giờ server, upload bị ngắt, lịch sử khôi phục sau logout, tài khoản mới không thấy tin cũ"],
-                    ["tests/test_regressions.py", "11 lỗi hồi quy (B1–B3, P1, P2, M1, D1–D3, G1) + so sánh tối ưu với cách tính vét cạn"]],
+                    ["tests/test_regressions.py", "11 lỗi hồi quy (B1–B3, P1, P2, M1, D1–D3, G1) + so sánh tối ưu với cách tính vét cạn"],
+                    ["tests/test_tcp_handshake.py", "HELLO → HELLO_ACK; sai phiên bản / rác không làm sập server; nhiều bắt tay TCP đồng thời; client đăng nhập luôn bắt tay TCP trước; không có TCP → lỗi rõ ràng"],
+                    ["tests/test_review_fixes.py", "P2P đứt giữa chừng dọn file .part; file nhóm vẫn tới người khác khi peer đầu không với tới; chặn file-id xấu; mẫu tốc độ BBR; discovery trên Python 3.10"]],
                    [3.6 * cm, 13.4 * cm]))
     S.append(PageBreak())
 
@@ -606,6 +642,9 @@ fid = await self.core.send_file(to, name, size, body(), fid)''',
         ("Mơ hồ khi đo RTT / phân biệt gửi lại",
          "Giống TCP, ACK của gói gửi lại gây nhập nhằng. Dùng số hiệu gói mới cho mọi lần gửi (kiểu QUIC) và ghi nhớ frame nào nằm trong gói nào; "
          "khi gói bị coi là mất chỉ đưa lại <i>dải byte</i> tương ứng vào hàng đợi retransmit — không gửi lại cả file."),
+        ("Đề yêu cầu \"TCP socket connection + acknowledgment\" nhưng giao thức chạy trên UDP",
+         "Thêm bước bắt tay TCP thật (HELLO → HELLO_ACK) cùng số cổng với UDP: client xác nhận server sống, đúng phiên bản và biết cổng UDP trước khi "
+         "chuyển sang transport UDP. TCP chỉ dùng cho bước này nên không mất ưu điểm không bị Head-of-Line blocking của transport đa stream."),
         ("Phân mảnh (fragmentation) gói UDP",
          "Datagram luôn ≤ 1200 B (dưới MTU) và tự phân đoạn dữ liệu thành frame STREAM, tránh phân mảnh IP — thứ làm mất cả gói khi một mảnh mất."),
         ("Áp lực ngược khi gửi file",
@@ -629,7 +668,7 @@ fid = await self.core.send_file(to, name, size, body(), fid)''',
     S.append(table([["Thách thức", "Giải pháp"]] + [[a, b] for a, b in ch], [4.0 * cm, 13.0 * cm]))
     S += [Spacer(1, 6), P("<b>Hạn chế đã biết:</b> chưa có chống khuếch đại/giả mạo địa chỉ ở INITIAL (cần cookie/retry như QUIC), "
                           "BBR là bản rút gọn v1, danh sách stream đã kết thúc (chống replay) lưu trong RAM, "
-                          "chỉ hỗ trợ IPv4. Truyền file P2P chỉ chạy khi hai client kết nối trực tiếp được với nhau "
+                          "chỉ hỗ trợ IPv4; cần mở cả 9000/TCP và 9000/UDP trên tường lửa. Truyền file P2P chỉ chạy khi hai client kết nối trực tiếp được với nhau "
                           "(không có relay/TURN cho NAT đối xứng), và lịch sử chat nằm trong một file JSON giới hạn 4000 tin "
                           "(mỗi lần đăng nhập chỉ phát lại 300 tin / 512 KB).", base)]
 
