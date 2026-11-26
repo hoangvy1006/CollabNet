@@ -1,7 +1,7 @@
-# Graph Report - source  (2026-11-24)
+# Graph Report - source  (2026-11-26)
 
 ## Corpus Check
-- 33 files · ~83,951 words
+- 33 files · ~62,523 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 10 file(s) not represented in the graph (top: .woff2 8, (none) 1, .css 1)
 
@@ -11,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `f33fbc3f`
+- Built from commit: `ab1dbbf3`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -57,24 +57,24 @@
 2. `Connection` - 46 edges
 3. `Server` - 38 edges
 4. `Endpoint` - 35 edges
-5. `pack()` - 24 edges
-6. `Gateway` - 24 edges
+5. `Gateway` - 24 edges
+6. `pack()` - 24 edges
 7. `MsgBuffer` - 23 edges
 8. `connectEvents()` - 21 edges
 9. `KỊCH BẢN THUYẾT TRÌNH & DEMO — CollabNet` - 20 edges
 10. `Pair` - 19 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `7.1. Lời thuyết trình (đọc gần như nguyên văn)` --references--> `ProtocolError`  [INFERRED]
-  docs/presentation_script.md → common/protocol.py
-- `7.4. Câu hỏi giảng viên có thể hỏi` --references--> `ProtocolError`  [INFERRED]
-  docs/presentation_script.md → common/protocol.py
 - `4.1. Lời thuyết trình (đọc gần như nguyên văn)` --references--> `Session`  [INFERRED]
   docs/presentation_script.md → server/server.py
 - `3.1. Lời thuyết trình (đọc gần như nguyên văn)` --references--> `Server`  [INFERRED]
   docs/presentation_script.md → server/server.py
-- `4.1. Lời thuyết trình (đọc gần như nguyên văn)` --references--> `Connection`  [INFERRED]
+- `4.3. Wireshark — chứng minh nhiều client cùng lúc` --references--> `Endpoint`  [INFERRED]
   docs/presentation_script.md → common/transport.py
+- `7.1. Lời thuyết trình (đọc gần như nguyên văn)` --references--> `ProtocolError`  [INFERRED]
+  docs/presentation_script.md → common/protocol.py
+- `7.4. Câu hỏi giảng viên có thể hỏi` --references--> `ProtocolError`  [INFERRED]
+  docs/presentation_script.md → common/protocol.py
 
 ## Import Cycles
 - None detected.
